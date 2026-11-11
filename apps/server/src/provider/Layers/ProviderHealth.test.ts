@@ -1,6 +1,6 @@
 import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as OS from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { ProviderInstanceId, ServerProviderStatus } from "@synara/contracts";
@@ -58,6 +58,8 @@ import {
   PACKAGE_MANAGED_PROVIDER_UPDATES,
   prependPathEntry,
   PROVIDER_HEALTH_PROBE_CONCURRENCY,
+  PROVIDER_HEALTHY_RECHECK_FLOOR_MS,
+  providerHealthSettingsKey,
   providerStatusesEqual,
   ProviderHealthLive,
   projectProviderStatusesForSettings,
@@ -241,6 +243,14 @@ const allProvidersDisabledServerSettings = {
     omp: { ...DEFAULT_SERVER_SETTINGS.providers.omp, enabled: false },
   },
 } satisfies typeof DEFAULT_SERVER_SETTINGS;
+
+function codexOf(statuses: ReadonlyArray<ServerProviderStatus>) {
+  return statuses.find((status) => status.provider === "codex");
+}
+
+function countOf(commands: ReadonlyArray<string>, entry: string) {
+  return commands.filter((item) => item === entry).length;
+}
 
 describe("provider health probe concurrency", () => {
   it.effect("bounds concurrent probes while preserving every result", () =>
@@ -1229,6 +1239,402 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         assert.strictEqual(spawnCount, 0);
       }),
     );
+  });
+
+  // Every CLI here is the mocked spawner; the fake binaries are only stat-ed by
+  // the version cache and are never executed.
+  describe("automatic and explicit refresh cost", () => {
+    const CODEX_LOGIN_STATUS = "-c mcp_servers={} login status";
+
+    const waitRealMs = (ms: number) =>
+      Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+    const waitForCommands = (commands: ReadonlyArray<string>, count: number) =>
+      Effect.gen(function* () {
+        for (let attempt = 0; attempt < 200 && commands.length < count; attempt += 1) {
+          yield* waitRealMs(5);
+        }
+      });
+
+    const makeFakeBinary = (name: string) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const dir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "provider-health-bin-" });
+        const binaryPath = path.join(dir, name);
+        writeFileSync(binaryPath, "#!/bin/sh\nexit 0\n");
+        chmodSync(binaryPath, 0o755);
+        return binaryPath;
+      });
+
+    const makeCodexHealthLayer = (input: {
+      readonly baseDir: string;
+      readonly binaryPath: string;
+      readonly loggedIn: { value: boolean };
+      readonly commands: string[];
+    }) =>
+      ProviderHealthLive.pipe(
+        Layer.provideMerge(
+          ServerSettingsService.layerTest({
+            ...allProvidersDisabledSettings,
+            enableProviderUpdateChecks: false,
+            providers: {
+              ...allProvidersDisabledSettings.providers,
+              codex: { enabled: true, binaryPath: input.binaryPath },
+            },
+          }),
+        ),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), input.baseDir)),
+        Layer.provideMerge(
+          mockSpawnerLayer((args) => {
+            const joined = args.join(" ");
+            input.commands.push(joined);
+            if (joined === "--version") return { stdout: "codex 1.0.0\n", stderr: "", code: 0 };
+            if (joined === CODEX_LOGIN_STATUS) {
+              return input.loggedIn.value
+                ? { stdout: "Logged in\n", stderr: "", code: 0 }
+                : { stdout: "", stderr: "Not logged in. Run codex login.", code: 1 };
+            }
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      );
+
+    const setUp = (loggedIn: boolean) =>
+      Effect.gen(function* () {
+        yield* withTempCodexHome();
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "provider-health-refresh-cost-",
+        });
+        const binaryPath = yield* makeFakeBinary("codex");
+        const commands: string[] = [];
+        const loggedInRef = { value: loggedIn };
+        const layer = makeCodexHealthLayer({
+          baseDir,
+          binaryPath,
+          loggedIn: loggedInRef,
+          commands,
+        });
+        return { commands, loggedIn: loggedInRef, layer };
+      });
+
+    it.effect("re-checks a ready, signed-in provider at most once per floor when automatic", () =>
+      Effect.gen(function* () {
+        const { commands, layer } = yield* setUp(true);
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          const refreshAutomatic = providerHealth.refreshAutomatic!;
+
+          // Nothing is known yet, so the first automatic pass probes in full.
+          const first = yield* refreshAutomatic;
+          assert.deepStrictEqual(commands, ["--version", CODEX_LOGIN_STATUS]);
+          assert.strictEqual(codexOf(first)?.authStatus, "authenticated");
+
+          const second = yield* refreshAutomatic;
+          assert.strictEqual(commands.length, 2);
+          assert.ok(providerStatusesEqual(first, second));
+
+          yield* TestClock.adjust(Duration.millis(PROVIDER_HEALTHY_RECHECK_FLOOR_MS - 1));
+          yield* refreshAutomatic;
+          assert.strictEqual(commands.length, 2);
+
+          // Past the floor the auth state is re-checked; the unchanged binary's
+          // version output is reused.
+          yield* TestClock.adjust(Duration.millis(1));
+          const third = yield* refreshAutomatic;
+          assert.deepStrictEqual(commands, ["--version", CODEX_LOGIN_STATUS, CODEX_LOGIN_STATUS]);
+          assert.strictEqual(codexOf(third)?.authStatus, "authenticated");
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    it.effect("re-probes a signed-out provider on every automatic refresh", () =>
+      Effect.gen(function* () {
+        const { commands, loggedIn, layer } = yield* setUp(false);
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          const refreshAutomatic = providerHealth.refreshAutomatic!;
+
+          const signedOut = yield* refreshAutomatic;
+          assert.strictEqual(codexOf(signedOut)?.authStatus, "unauthenticated");
+          yield* refreshAutomatic;
+          assert.deepStrictEqual(commands, ["--version", CODEX_LOGIN_STATUS, CODEX_LOGIN_STATUS]);
+
+          // `codex login` in a terminal, then the window regains focus: no floor
+          // applies, so the very next automatic refresh reports the sign-in.
+          loggedIn.value = true;
+          const signedIn = yield* refreshAutomatic;
+          assert.strictEqual(codexOf(signedIn)?.authStatus, "authenticated");
+          assert.strictEqual(commands.length, 4);
+
+          // From here on it is a healthy provider and the floor applies.
+          yield* refreshAutomatic;
+          assert.strictEqual(commands.length, 4);
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    it.effect("re-probes every provider in full on explicit refreshes", () =>
+      Effect.gen(function* () {
+        const { commands, layer } = yield* setUp(true);
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          yield* providerHealth.refreshAutomatic!;
+          yield* providerHealth.refresh;
+          yield* providerHealth.refresh;
+          assert.deepStrictEqual(commands, [
+            "--version",
+            CODEX_LOGIN_STATUS,
+            "--version",
+            CODEX_LOGIN_STATUS,
+            "--version",
+            CODEX_LOGIN_STATUS,
+          ]);
+          // An explicit refresh also restarts the floor window for automatic ones.
+          yield* providerHealth.refreshAutomatic!;
+          assert.strictEqual(commands.length, 6);
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    // Codex is signed in (the floor applies); Cursor is signed out and its
+    // `status` probe can be held open to stand in for a slow signed-out probe.
+    const makeGatedTwoProviderLayer = (input: {
+      readonly baseDir: string;
+      readonly codexBinaryPath: string;
+      readonly cursorBinaryPath: string;
+      readonly commands: string[];
+      readonly holdCursorStatusCall: number;
+      readonly gate: { readonly started: () => void; readonly released: Promise<void> };
+    }) => {
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) => {
+          const cmd = command as unknown as { command: string; args: ReadonlyArray<string> };
+          const entry = `${basename(cmd.command)} ${cmd.args.join(" ")}`;
+          input.commands.push(entry);
+          if (entry === "codex --version") {
+            return Effect.succeed(mockHandle({ stdout: "codex 1.0.0\n", stderr: "", code: 0 }));
+          }
+          if (entry === `codex ${CODEX_LOGIN_STATUS}`) {
+            return Effect.succeed(mockHandle({ stdout: "Logged in\n", stderr: "", code: 0 }));
+          }
+          if (entry === "cursor-agent --version") {
+            return Effect.succeed(
+              mockHandle({ stdout: "agent 2026.04.27\n", stderr: "", code: 0 }),
+            );
+          }
+          if (entry === "cursor-agent status") {
+            const result = { stdout: "Not authenticated\n", stderr: "", code: 1 };
+            const call = input.commands.filter((item) => item === entry).length;
+            if (call !== input.holdCursorStatusCall) {
+              return Effect.succeed(mockHandle(result));
+            }
+            input.gate.started();
+            return Effect.succeed(
+              mockHandle(result, {
+                exitCode: Effect.promise(() => input.gate.released).pipe(
+                  Effect.as(ChildProcessSpawner.ExitCode(1)),
+                ),
+              }),
+            );
+          }
+          throw new Error(`Unexpected command: ${entry}`);
+        }),
+      );
+      return ProviderHealthLive.pipe(
+        Layer.provideMerge(
+          ServerSettingsService.layerTest({
+            ...allProvidersDisabledSettings,
+            enableProviderUpdateChecks: false,
+            providers: {
+              ...allProvidersDisabledSettings.providers,
+              codex: { enabled: true, binaryPath: input.codexBinaryPath },
+              cursor: { enabled: true, binaryPath: input.cursorBinaryPath },
+            },
+          }),
+        ),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), input.baseDir)),
+        Layer.provideMerge(spawnerLayer),
+      );
+    };
+
+    const setUpGated = (holdCursorStatusCall: number) =>
+      Effect.gen(function* () {
+        yield* withTempCodexHome();
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "provider-health-forced-join-",
+        });
+        const codexBinaryPath = yield* makeFakeBinary("codex");
+        const cursorBinaryPath = yield* makeFakeBinary("cursor-agent");
+        const commands: string[] = [];
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        const layer = makeGatedTwoProviderLayer({
+          baseDir,
+          codexBinaryPath,
+          cursorBinaryPath,
+          commands,
+          holdCursorStatusCall,
+          gate: { started: markStarted, released },
+        });
+        return { commands, layer, release, started };
+      });
+
+    it.effect(
+      "upgrades an in-flight automatic pass for an explicit refresh instead of running two",
+      () =>
+        Effect.gen(function* () {
+          // Call 1 is the baseline explicit refresh; call 2 is the automatic pass.
+          const { commands, layer, release, started } = yield* setUpGated(2);
+          yield* Effect.gen(function* () {
+            const providerHealth = yield* ProviderHealth;
+            yield* providerHealth.refresh;
+            const baseline = commands.length;
+            assert.strictEqual(baseline, 4);
+
+            // Focus: Codex is answered from the floor, signed-out Cursor is re-probed.
+            const automatic = yield* providerHealth.refreshAutomatic!.pipe(Effect.forkChild);
+            yield* Effect.promise(() => started);
+            // "Check again" while that slow probe is still running.
+            const explicit = yield* providerHealth.refresh.pipe(Effect.forkChild);
+            yield* waitRealMs(20);
+            assert.deepStrictEqual(commands.slice(baseline), ["cursor-agent status"]);
+            release();
+            const automaticResult = yield* Fiber.join(automatic);
+            const explicitResult = yield* Fiber.join(explicit);
+
+            // One probe per instance for the click: Cursor's in-flight status probe
+            // is shared (its version output was verified against the unchanged
+            // binary), and Codex, which the automatic pass had reused, gets exactly
+            // one forced probe that bypasses the version cache.
+            const click = commands.slice(baseline);
+            assert.strictEqual(countOf(click, "cursor-agent status"), 1);
+            assert.strictEqual(countOf(click, "cursor-agent --version"), 0);
+            assert.strictEqual(countOf(click, `codex ${CODEX_LOGIN_STATUS}`), 1);
+            assert.strictEqual(countOf(click, "codex --version"), 1);
+            assert.strictEqual(click.length, 3);
+            assert.ok(providerStatusesEqual(automaticResult, explicitResult));
+            assert.strictEqual(codexOf(explicitResult)?.authStatus, "authenticated");
+            assert.strictEqual(
+              explicitResult.find((status) => status.provider === "cursor")?.authStatus,
+              "unauthenticated",
+            );
+          }).pipe(Effect.provide(layer));
+        }),
+    );
+
+    it.effect("shares one pass between explicit refreshes that arrive together", () =>
+      Effect.gen(function* () {
+        const { commands, layer, release, started } = yield* setUpGated(1);
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          const first = yield* providerHealth.refresh.pipe(Effect.forkChild);
+          yield* Effect.promise(() => started);
+          const second = yield* providerHealth.refresh.pipe(Effect.forkChild);
+          release();
+          const [firstResult, secondResult] = yield* Effect.all([
+            Fiber.join(first),
+            Fiber.join(second),
+          ]);
+          assert.strictEqual(countOf(commands, "cursor-agent status"), 1);
+          assert.strictEqual(countOf(commands, "cursor-agent --version"), 1);
+          assert.strictEqual(countOf(commands, `codex ${CODEX_LOGIN_STATUS}`), 1);
+          assert.strictEqual(countOf(commands, "codex --version"), 1);
+          assert.ok(providerStatusesEqual(firstResult, secondResult));
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    it.effect("starts a new explicit pass once an automatic pass has already finished", () =>
+      Effect.gen(function* () {
+        const { commands, layer, release } = yield* setUpGated(0);
+        release();
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          yield* providerHealth.refresh;
+          yield* providerHealth.refreshAutomatic!;
+          const baseline = commands.length;
+          yield* providerHealth.refresh;
+          // Nothing in flight: today's full explicit pass.
+          assert.deepStrictEqual(commands.slice(baseline).toSorted(), [
+            "codex --version",
+            `codex ${CODEX_LOGIN_STATUS}`,
+            "cursor-agent --version",
+            "cursor-agent status",
+          ]);
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    it.effect("probes on provider settings changes but not on unrelated settings edits", () =>
+      Effect.gen(function* () {
+        const { commands, layer } = yield* setUp(true);
+        const otherBinaryPath = yield* makeFakeBinary("codex-next");
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          const serverSettings = yield* ServerSettingsService;
+          yield* providerHealth.refresh;
+          assert.strictEqual(commands.length, 2);
+
+          // Typing in custom instructions saves on every edit.
+          yield* serverSettings.updateSettings({ sourceControlCustomInstructions: "Keep" });
+          yield* serverSettings.updateSettings({
+            sourceControlCustomInstructions: "Keep it short",
+          });
+          yield* waitRealMs(50);
+          yield* TestClock.adjust(Duration.seconds(1));
+          yield* waitRealMs(20);
+          assert.strictEqual(commands.length, 2);
+
+          // Pointing the provider at another binary is a provider setting: probe in full.
+          yield* serverSettings.updateSettings({
+            providers: { codex: { binaryPath: otherBinaryPath } },
+          });
+          yield* waitForCommands(commands, 4);
+          yield* waitRealMs(50);
+          yield* TestClock.adjust(Duration.seconds(1));
+          yield* waitRealMs(20);
+          assert.deepStrictEqual(commands.slice(2), ["--version", CODEX_LOGIN_STATUS]);
+        }).pipe(Effect.provide(layer));
+      }),
+    );
+
+    it("keys probe-relevant settings only", () => {
+      const base = DEFAULT_SERVER_SETTINGS;
+      const key = providerHealthSettingsKey(base);
+      assert.strictEqual(
+        providerHealthSettingsKey({ ...base, sourceControlCustomInstructions: "Be brief." }),
+        key,
+      );
+      assert.strictEqual(
+        providerHealthSettingsKey({ ...base, sourceControlWritingStyle: "conventional" }),
+        key,
+      );
+      const withCodex = (codex: Partial<typeof base.providers.codex>) =>
+        providerHealthSettingsKey({
+          ...base,
+          providers: { ...base.providers, codex: { ...base.providers.codex, ...codex } },
+        });
+      assert.notStrictEqual(withCodex({ binaryPath: "/opt/codex/bin/codex" }), key);
+      assert.notStrictEqual(withCodex({ enabled: !base.providers.codex.enabled }), key);
+      assert.notStrictEqual(withCodex({ homePath: "/tmp/codex-home" }), key);
+      assert.notStrictEqual(
+        providerHealthSettingsKey({
+          ...base,
+          enableProviderUpdateChecks: !base.enableProviderUpdateChecks,
+        }),
+        key,
+      );
+    });
   });
 
   describe("stabilizeProviderStatusesAgainstTransientTimeouts", () => {

@@ -5,6 +5,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { readDesktopWindowTranslucency } from "../lib/desktopWindowTranslucency";
+import { ensureGoogleFontsStylesheet } from "../lib/googleFonts";
 import {
   DEFAULT_THEME_STATE,
   type ChromeTheme,
@@ -29,6 +30,7 @@ import {
   setThemeCodeThemeId,
   setThemeFonts,
   setWindowTranslucency as setWindowTranslucencyState,
+  themeUsesGoogleFonts,
   updateChromeTheme,
   updateThemePackFromShareString,
 } from "../theme/theme.logic";
@@ -195,6 +197,11 @@ function applyThemeState(state: ThemeState, suppressTransitions = false) {
   root.setAttribute("data-window-material", cssVariableBuild.material);
   root.setAttribute("data-window-translucency", cssVariableBuild.translucencyScope);
 
+  // Load the web fonts only for a theme whose applied fonts name them; once added, the
+  // stylesheet stays for the session.
+  if (themeUsesGoogleFonts(activeTheme, { systemUiFont: state.systemUiFont })) {
+    ensureGoogleFontsStylesheet();
+  }
   for (const [name, value] of Object.entries(cssVariableBuild.variables)) {
     if (value.trim().length === 0) {
       root.style.removeProperty(name);

@@ -4,7 +4,7 @@
 // Layer: Route-level screen (mounted at /link).
 // Exports: DeviceLinkApproval, DeviceCodeField
 
-import { useCallback, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import { SidebarHeaderNavigationControls } from "~/components/SidebarHeaderNavigationControls";
 import { ShortCodeField } from "~/components/hosts/ShortCodeField";
@@ -12,6 +12,7 @@ import { Button } from "~/components/ui/button";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { useAccount } from "~/hooks/useAccount";
 import { accountErrorMessage } from "~/lib/accountLogic";
+import { ensureGoogleFontsStylesheet } from "~/lib/googleFonts";
 import { ensureHostsApi } from "~/lib/hosts/api";
 import { DEVICE_USER_CODE_LENGTH, isCompleteDeviceUserCode } from "~/lib/hosts/enrollment";
 import {
@@ -72,6 +73,8 @@ export function DeviceLinkApproval() {
   const statusId = useId();
   const trafficLightGutter = useDesktopTopBarTrafficLightGutterClassName();
   const windowControlsGutter = useDesktopTopBarWindowControlsGutterClassName();
+  // The heading is set in the display face, Cal Sans.
+  useEffect(() => ensureGoogleFontsStylesheet(), []);
 
   const submit = useCallback(async () => {
     if (!isCompleteDeviceUserCode(code)) return;

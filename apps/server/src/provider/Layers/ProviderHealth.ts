@@ -8,6 +8,7 @@
  *
  * @module ProviderHealthLive
  */
+import { createHash } from "node:crypto";
 import * as OS from "node:os";
 import nodePath from "node:path";
 import type {
@@ -34,6 +35,7 @@ import { expandHomePath } from "@synara/shared/synaraHome";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   Array,
+  Clock,
   DateTime,
   Duration,
   Effect,
@@ -102,6 +104,11 @@ import {
   type CommandResult,
 } from "../providerCliOutput";
 import { probeProviderCliVersion } from "../providerCliVersionProbe";
+import {
+  CurrentProviderCliVersionCache,
+  makeProviderCliVersionCache,
+  withProviderCliVersionCache,
+} from "../providerCliVersionCache";
 import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHealth";
 import {
   orderProviderStatuses,
@@ -202,6 +209,13 @@ export const prependPathEntry = (
 
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
 export const PROVIDER_HEALTH_PROBE_CONCURRENCY = 4;
+/**
+ * Automatic refreshes (window focus, visibility, timers) re-probe a provider
+ * that was ready and authenticated at its last probe at most this often. Every
+ * other state is re-probed on each automatic refresh, so a login finished in a
+ * terminal shows up as soon as the window regains focus.
+ */
+export const PROVIDER_HEALTHY_RECHECK_FLOOR_MS = 2 * 60_000;
 const MAX_REFRESH_REVISION_RETRIES = 1;
 const REFRESH_REVISION_RESCHEDULE_DELAY_MS = 100;
 const PROVIDER_UPDATE_ENABLEMENT_POLL_MS = 100;
@@ -233,6 +247,46 @@ function providerStatusInstanceKey(status: ServerProviderStatus): ProviderInstan
 // them to prevent a reused id from inheriting another provider's auth/status.
 function providerStatusIdentityKey(status: ServerProviderStatus): string {
   return `${status.driver ?? status.provider}\u0000${providerStatusInstanceKey(status)}`;
+}
+
+/**
+ * Mode of one shared refresh pass. `forced` starts true for explicit refreshes
+ * and flips to true when an explicit request joins a running automatic pass;
+ * instances read it as they start. `reusedWhileAutomatic` collects instances the
+ * pass answered from the floor, which an upgraded pass re-probes once at the end.
+ * `closed` is set once the pass has decided its result, after which an explicit
+ * request starts a new pass instead of upgrading this one.
+ */
+interface RefreshPass {
+  forced: boolean;
+  closed: boolean;
+  readonly reusedWhileAutomatic: Set<string>;
+}
+
+function makeRefreshPass(forced: boolean): RefreshPass {
+  return { forced, closed: false, reusedWhileAutomatic: new Set() };
+}
+
+export function isHealthyAuthenticatedProviderStatus(status: ServerProviderStatus): boolean {
+  return status.available && status.status === "ready" && status.authStatus === "authenticated";
+}
+
+// Hashed so these comparison keys never hold plaintext provider environment values.
+function fingerprintValue(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("base64url");
+}
+
+/**
+ * Key over every setting a provider probe reads: the resolved instances (enabled
+ * state, binary paths, homes, accounts, environment, driver config) plus the
+ * update-check toggle that controls version-advisory enrichment. Other settings
+ * only change the projection, which is republished without running CLIs.
+ */
+export function providerHealthSettingsKey(settings: ServerSettings): string {
+  return fingerprintValue({
+    instances: deriveProviderInstances(settings),
+    enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+  });
 }
 
 function providerStatusKey(input: {
@@ -772,7 +826,19 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
     (acc, chunk) => acc + new TextDecoder().decode(chunk),
   );
 
+// `--version` probes go through the refresh pass's version cache when one is
+// provided (see providerCliVersionCache.ts); every other command always runs.
 const runProviderCommand = (
+  executable: string,
+  args: ReadonlyArray<string>,
+  options: { readonly env: NodeJS.ProcessEnv; readonly cwd?: string | undefined },
+) =>
+  withProviderCliVersionCache(
+    { command: executable, args, env: options.env, cwd: options.cwd },
+    runProviderCommandUncached(executable, args, options),
+  );
+
+const runProviderCommandUncached = (
   executable: string,
   args: ReadonlyArray<string>,
   options: { readonly env: NodeJS.ProcessEnv; readonly cwd?: string | undefined },
@@ -3131,7 +3197,18 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
       const updateStatesRef = yield* Ref.make<ReadonlyMap<string, ServerProviderUpdateState>>(
         new Map(),
       );
-      const refreshFiberRef = yield* Ref.make<Fiber.Fiber<ProviderStatuses, never> | null>(null);
+      const refreshFiberRef = yield* Ref.make<{
+        readonly fiber: Fiber.Fiber<ProviderStatuses, never>;
+        readonly pass: RefreshPass;
+      } | null>(null);
+      const versionProbeCache = makeProviderCliVersionCache();
+      // Last real probe per driver+instance, for the automatic-refresh floor.
+      const lastInstanceProbesRef = yield* Ref.make<
+        ReadonlyMap<
+          string,
+          { readonly probedAtMs: number; readonly instanceKey: string; readonly healthy: boolean }
+        >
+      >(new Map());
       const refreshNeedsFollowUpRef = yield* Ref.make(false);
       const commandCoordinator = yield* makeProviderMaintenanceCommandCoordinator({
         makeAlreadyRunningError: (provider) =>
@@ -3563,28 +3640,94 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
         }
       };
 
-      const loadProviderStatuses = serverSettings.ready
-        .pipe(
-          Effect.flatMap(() => serverSettings.getSettings),
-          Effect.flatMap((settings) =>
-            runProviderHealthProbes(
-              deriveProviderInstances(settings).map((instance) =>
-                checkProviderInstanceStatus(instance),
+      // An automatic refresh reuses the current status of a provider that was
+      // ready and authenticated at its last real probe within the floor, as long
+      // as its instance settings are unchanged. Everything else is probed. The
+      // pass mode is read when each instance starts, so an explicit request that
+      // upgrades a running pass forces every instance the pass has not reached.
+      // `only` limits a completion pass to the instances an upgraded pass reused;
+      // the rest keep the status this pass just produced.
+      const checkProviderInstanceForRefresh = (
+        instance: ResolvedProviderInstance,
+        pass: RefreshPass,
+        only: ReadonlySet<string> | null,
+      ) =>
+        Effect.gen(function* () {
+          const probeKey = `${instance.driver}\u0000${instance.instanceId}`;
+          const currentStatus = Effect.map(Ref.get(statusesRef), (statuses) =>
+            statuses.find((status) => providerStatusIdentityKey(status) === probeKey),
+          );
+          if (only !== null && !only.has(probeKey)) {
+            if (!instance.enabled) {
+              return Option.none<ServerProviderStatus>();
+            }
+            const current = yield* currentStatus;
+            if (current) {
+              return Option.some(current);
+            }
+          }
+          const force = pass.forced;
+          const instanceKey = fingerprintValue(instance);
+          const startedAtMs = yield* Clock.currentTimeMillis;
+          if (!force && instance.enabled) {
+            const lastProbe = (yield* Ref.get(lastInstanceProbesRef)).get(probeKey);
+            if (
+              lastProbe?.healthy === true &&
+              lastProbe.instanceKey === instanceKey &&
+              startedAtMs - lastProbe.probedAtMs < PROVIDER_HEALTHY_RECHECK_FLOOR_MS
+            ) {
+              const current = yield* currentStatus;
+              if (current && isHealthyAuthenticatedProviderStatus(current)) {
+                pass.reusedWhileAutomatic.add(probeKey);
+                return Option.some(current);
+              }
+            }
+          }
+          const result = yield* checkProviderInstanceStatus(instance).pipe(
+            Effect.provideService(CurrentProviderCliVersionCache, {
+              cache: versionProbeCache,
+              bypass: force,
+            }),
+          );
+          yield* Ref.update(lastInstanceProbesRef, (previous) => {
+            const next = new Map(previous);
+            if (Option.isSome(result)) {
+              next.set(probeKey, {
+                probedAtMs: startedAtMs,
+                instanceKey,
+                healthy: isHealthyAuthenticatedProviderStatus(result.value),
+              });
+            } else {
+              next.delete(probeKey);
+            }
+            return next;
+          });
+          return result;
+        });
+
+      const loadProviderStatuses = (pass: RefreshPass, only: ReadonlySet<string> | null) =>
+        serverSettings.ready
+          .pipe(
+            Effect.flatMap(() => serverSettings.getSettings),
+            Effect.flatMap((settings) =>
+              runProviderHealthProbes(
+                deriveProviderInstances(settings).map((instance) =>
+                  checkProviderInstanceForRefresh(instance, pass, only),
+                ),
               ),
             ),
-          ),
-        )
-        .pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
-          Effect.map((statuses) =>
-            orderProviderStatuses(
-              statuses.flatMap((status) => (Option.isSome(status) ? [status.value] : [])),
+          )
+          .pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.map((statuses) =>
+              orderProviderStatuses(
+                statuses.flatMap((status) => (Option.isSome(status) ? [status.value] : [])),
+              ),
             ),
-          ),
-          Effect.flatMap(enrichStatuses),
-        );
+            Effect.flatMap(enrichStatuses),
+          );
 
       const persistStatuses = (statuses: ProviderStatuses) =>
         Effect.forEach(
@@ -3607,69 +3750,123 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
           { concurrency: "unbounded", discard: true },
         );
 
-      const refreshNow = Effect.gen(function* () {
-        let revisionRetries = 0;
-        while (true) {
-          const refreshRevision = (yield* serverSettings.getSnapshot).revision;
-          // Drop the cached Claude subscription probe so switching accounts (login
-          // / logout / add account outside the app) is reflected on the next
-          // refresh instead of being pinned to the old account for up to 5 minutes.
-          yield* Ref.set(claudeSubscriptionCacheRef, new Map());
-          const loadedStatuses = yield* loadProviderStatuses;
-          if ((yield* serverSettings.getSnapshot).revision !== refreshRevision) {
-            // A caller that joined this refresh expects the settings mutation it
-            // just made to be reflected. Retry in the same shared fiber so an
-            // enable cannot resolve with the stale pre-mutation probe.
-            if (revisionRetries < MAX_REFRESH_REVISION_RETRIES) {
-              revisionRetries += 1;
-              continue;
+      const currentProviderHealthSettingsKey = serverSettings.getSettings.pipe(
+        Effect.map(providerHealthSettingsKey),
+      );
+
+      const refreshNow = (pass: RefreshPass, only: ReadonlySet<string> | null = null) =>
+        Effect.gen(function* () {
+          let revisionRetries = 0;
+          while (true) {
+            // Only settings a probe reads can make this pass stale; edits such as
+            // custom instructions must not restart probes that are already running.
+            const refreshSettingsKey = yield* currentProviderHealthSettingsKey;
+            // Drop the cached Claude subscription probe so switching accounts (login
+            // / logout / add account outside the app) is reflected on the next
+            // refresh instead of being pinned to the old account for up to 5
+            // minutes. Automatic refreshes keep the cache while every Claude
+            // instance stays signed in, and drop it once one is not, so signing
+            // back in from a terminal never shows the previous account's plan.
+            const claudeSignedOut = (yield* Ref.get(statusesRef)).some(
+              (status) =>
+                (status.driver ?? status.provider) === CLAUDE_AGENT_PROVIDER &&
+                status.enabled !== false &&
+                !isHealthyAuthenticatedProviderStatus(status),
+            );
+            if (pass.forced || claudeSignedOut) {
+              yield* Ref.set(claudeSubscriptionCacheRef, new Map());
             }
-            // Keep the joined refresh bounded, but queue one final cycle so a
-            // second settings mutation cannot leave the newest provider state
-            // waiting for an unrelated future refresh.
-            yield* Ref.set(refreshNeedsFollowUpRef, true);
-            const currentStatuses = yield* Ref.get(statusesRef);
-            return yield* projectStatusesForCurrentSettings(currentStatuses);
-          }
-          const previousRawStatuses = yield* Ref.get(statusesRef);
-          const previousStatuses = yield* projectStatusesForCurrentSettings(previousRawStatuses);
-          const stabilizedLoadedStatuses = stabilizeProviderStatusesAgainstTransientTimeouts(
-            previousRawStatuses,
-            loadedStatuses,
-          );
-          const nextRawStatuses = mergeProviderStatusUpdates(
-            previousRawStatuses,
-            stabilizedLoadedStatuses,
-          );
-          const nextStatuses = yield* projectStatusesForCurrentSettings(nextRawStatuses);
-          yield* Ref.set(statusesRef, nextRawStatuses);
-          if (providerStatusesEqual(previousStatuses, nextStatuses)) {
+            const loadedStatuses = yield* loadProviderStatuses(pass, only);
+            if ((yield* currentProviderHealthSettingsKey) !== refreshSettingsKey) {
+              // A caller that joined this refresh expects the settings mutation it
+              // just made to be reflected. Retry in the same shared fiber so an
+              // enable cannot resolve with the stale pre-mutation probe.
+              if (revisionRetries < MAX_REFRESH_REVISION_RETRIES) {
+                revisionRetries += 1;
+                continue;
+              }
+              // Keep the joined refresh bounded, but queue one final cycle so a
+              // second settings mutation cannot leave the newest provider state
+              // waiting for an unrelated future refresh.
+              yield* Ref.set(refreshNeedsFollowUpRef, true);
+              const currentStatuses = yield* Ref.get(statusesRef);
+              return yield* projectStatusesForCurrentSettings(currentStatuses);
+            }
+            const previousRawStatuses = yield* Ref.get(statusesRef);
+            const previousStatuses = yield* projectStatusesForCurrentSettings(previousRawStatuses);
+            const stabilizedLoadedStatuses = stabilizeProviderStatusesAgainstTransientTimeouts(
+              previousRawStatuses,
+              loadedStatuses,
+            );
+            const nextRawStatuses = mergeProviderStatusUpdates(
+              previousRawStatuses,
+              stabilizedLoadedStatuses,
+            );
+            const nextStatuses = yield* projectStatusesForCurrentSettings(nextRawStatuses);
+            yield* Ref.set(statusesRef, nextRawStatuses);
+            if (providerStatusesEqual(previousStatuses, nextStatuses)) {
+              return nextStatuses;
+            }
+            yield* persistStatuses(nextRawStatuses);
+            yield* PubSub.publish(changesPubSub, nextStatuses);
             return nextStatuses;
           }
-          yield* persistStatuses(nextRawStatuses);
-          yield* PubSub.publish(changesPubSub, nextStatuses);
-          return nextStatuses;
-        }
-      });
+        });
 
       // Keep a single refresh in flight so repeated config reads do not spawn
       // overlapping CLI probes while the cache already gives us a usable answer.
-      function ensureRefreshFiber(): Effect.Effect<Fiber.Fiber<ProviderStatuses, never>> {
+      //
+      // An explicit (forced) request that finds an automatic pass running joins
+      // it and upgrades it in place instead of queueing a second full pass:
+      // instances the pass has not started are probed forced (no floor, no
+      // version cache), instances already being probed finish once, and the
+      // instances it had answered from the floor get one forced completion
+      // probe before the shared result is returned. Every instance in the
+      // result is then fresh for the click, and none is probed twice for it.
+      // Follow-ups come from provider settings changes, so they are forced too.
+      function ensureRefreshFiber(
+        force: boolean,
+      ): Effect.Effect<Fiber.Fiber<ProviderStatuses, never>> {
         return Effect.gen(function* () {
           const inFlight = yield* Ref.get(refreshFiberRef);
           if (inFlight) {
-            return inFlight;
+            if (!force || inFlight.pass.forced) {
+              return inFlight.fiber;
+            }
+            if (inFlight.pass.closed) {
+              // The pass already decided it is done; it cannot take the upgrade.
+              yield* Fiber.await(inFlight.fiber);
+              return yield* ensureRefreshFiber(force);
+            }
+            // Same synchronous step as the `closed` check, so the pass cannot
+            // close between the check and the upgrade.
+            inFlight.pass.forced = true;
+            // Instances not yet probed must not reuse the old account's plan.
+            yield* Ref.set(claudeSubscriptionCacheRef, new Map());
+            return inFlight.fiber;
           }
+          const pass = makeRefreshPass(force);
           const refreshFiber = yield* Effect.gen(function* () {
             const refreshExit = yield* Effect.exit(
               Effect.gen(function* () {
-                const statuses = yield* refreshNow;
-                if (!(yield* Ref.getAndSet(refreshNeedsFollowUpRef, false))) {
-                  return statuses;
+                let statuses = yield* refreshNow(pass);
+                if (yield* Ref.getAndSet(refreshNeedsFollowUpRef, false)) {
+                  pass.forced = true;
+                  pass.reusedWhileAutomatic.clear();
+                  statuses = yield* refreshNow(pass);
                 }
-                return yield* refreshNow;
+                while (pass.forced && pass.reusedWhileAutomatic.size > 0) {
+                  const only = new Set(pass.reusedWhileAutomatic);
+                  pass.reusedWhileAutomatic.clear();
+                  statuses = yield* refreshNow(pass, only);
+                }
+                // Checked and closed in one synchronous step with the loop
+                // condition above; a later explicit request starts a new pass.
+                pass.closed = true;
+                return statuses;
               }),
             );
+            pass.closed = true;
             if (Exit.isSuccess(refreshExit)) {
               return refreshExit.value;
             }
@@ -3688,7 +3885,7 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
                 // shared refresh so a sustained settings burst cannot keep the
                 // current callers stuck or spin CLI probes without a pause.
                 yield* Effect.sleep(Duration.millis(REFRESH_REVISION_RESCHEDULE_DELAY_MS)).pipe(
-                  Effect.andThen(ensureRefreshFiber().pipe(Effect.asVoid)),
+                  Effect.andThen(ensureRefreshFiber(true).pipe(Effect.asVoid)),
                   Effect.forkIn(refreshScope),
                   Effect.asVoid,
                 );
@@ -3696,29 +3893,42 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
             ),
             Effect.forkIn(refreshScope),
           );
-          yield* Ref.set(refreshFiberRef, refreshFiber);
+          yield* Ref.set(refreshFiberRef, { fiber: refreshFiber, pass });
           return refreshFiber;
         });
       }
 
       // New-chat defaults change with every composer pick and never affect
       // providers, so they must not start CLI probes.
+      const initialStreamSettings = yield* serverSettings.getSettings.pipe(
+        Effect.catch(() => Effect.succeed(null)),
+      );
+      let lastProbedSettingsKey =
+        initialStreamSettings === null ? null : providerHealthSettingsKey(initialStreamSettings);
       yield* withoutNewThreadDefaultsOnlyChanges(
         serverSettings.streamChanges,
-        yield* serverSettings.getSettings.pipe(Effect.catch(() => Effect.succeed(null))),
+        initialStreamSettings,
       ).pipe(
         Stream.runForEach((settings) =>
           Effect.gen(function* () {
             // Publish settings-only projection changes immediately from the
             // cached raw probes; a CLI refresh can finish in the background.
             yield* publishProjectedStatusesForSettings(settings).pipe(Effect.asVoid);
+            // Only settings a probe reads (instances, binaries, homes, accounts,
+            // environment, update checks) launch CLIs. Typing in unrelated
+            // settings such as custom instructions only republishes the projection.
+            const settingsKey = providerHealthSettingsKey(settings);
+            if (settingsKey === lastProbedSettingsKey) {
+              return;
+            }
+            lastProbedSettingsKey = settingsKey;
             // If this settings change lands during a CLI probe, make the shared
             // refresh fiber run (or schedule) one more pass after the current
             // snapshot so the change cannot be hidden by the in-flight result.
             if (yield* Ref.get(refreshFiberRef)) {
               yield* Ref.set(refreshNeedsFollowUpRef, true);
             }
-            yield* ensureRefreshFiber().pipe(
+            yield* ensureRefreshFiber(true).pipe(
               Effect.flatMap(Fiber.join),
               Effect.forkIn(refreshScope),
               Effect.asVoid,
@@ -3728,7 +3938,10 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
         Effect.forkIn(refreshScope),
       );
 
-      const refresh: Effect.Effect<ProviderStatuses> = ensureRefreshFiber().pipe(
+      const refresh: Effect.Effect<ProviderStatuses> = ensureRefreshFiber(true).pipe(
+        Effect.flatMap(Fiber.join),
+      );
+      const refreshAutomatic: Effect.Effect<ProviderStatuses> = ensureRefreshFiber(false).pipe(
         Effect.flatMap(Fiber.join),
       );
 
@@ -3953,7 +4166,9 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
             return { providers };
           }
 
-          const providers = yield* refreshNow.pipe(Effect.mapError(toUpdateError));
+          const providers = yield* refreshNow(makeRefreshPass(true)).pipe(
+            Effect.mapError(toUpdateError),
+          );
           const refreshed = providers.find(
             (status) =>
               (status.driver ?? status.provider) === provider &&
@@ -4001,6 +4216,7 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
         // snapshot, while refreshes happen explicitly or from provider streams.
         getStatuses: Ref.get(statusesRef).pipe(Effect.flatMap(projectStatusesForCurrentSettings)),
         refresh,
+        refreshAutomatic,
         updateProvider,
         get streamChanges() {
           return Stream.fromPubSub(changesPubSub);

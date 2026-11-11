@@ -6,6 +6,7 @@ import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -90,9 +91,10 @@ describe("resolveLinuxDesktopIconName", () => {
   it("keeps the entry it finds first authoritative", () => {
     const dataHome = temporaryDirectory();
     const dataDir = temporaryDirectory();
-    const stableFile = "synara.desktop";
+    const stableIcon = synaraDesktopIdentity("production").userDataDirectoryName;
+    const stableFile = `${stableIcon}.desktop`;
     writeDesktopEntry(dataHome, stableFile, desktopEntry("Icon=/tmp/custom.png"));
-    writeDesktopEntry(dataDir, stableFile, desktopEntry("Icon=synara"));
+    writeDesktopEntry(dataDir, stableFile, desktopEntry(`Icon=${stableIcon}`));
 
     expect(
       resolveLinuxDesktopIconName({
@@ -108,12 +110,10 @@ describe("resolveLinuxDesktopIconName", () => {
     const dataDir = temporaryDirectory();
     const env = { XDG_DATA_HOME: dataHome, XDG_DATA_DIRS: dataDir };
     const homeDir = temporaryDirectory();
-    const flavors = [
-      ["production", "synara"],
-      ["beta", "synara-beta"],
-      ["canary", "synara-canary"],
-      ["cua", "synara-cua"],
-    ] as const;
+    // Packaging names each flavor's desktop entry and icon after its user-data directory.
+    const flavors = (["production", "beta", "canary", "cua"] as const).map(
+      (flavor) => [flavor, synaraDesktopIdentity(flavor).userDataDirectoryName] as const,
+    );
     for (const [, iconName] of flavors) {
       writeDesktopEntry(dataHome, `${iconName}.desktop`, desktopEntry(`Icon=${iconName}`));
     }
@@ -136,8 +136,13 @@ describe("resolveLinuxDesktopIconName", () => {
         ),
       ).toBe(flavor);
     }
-    for (const sharedIcon of ["synara", "synara-beta", "firefox"]) {
-      writeDesktopEntry(dataHome, "synara-canary.desktop", desktopEntry(`Icon=${sharedIcon}`));
+    const canaryFile = `${synaraDesktopIdentity("canary").userDataDirectoryName}.desktop`;
+    for (const sharedIcon of [
+      synaraDesktopIdentity("production").userDataDirectoryName,
+      synaraDesktopIdentity("beta").userDataDirectoryName,
+      "firefox",
+    ]) {
+      writeDesktopEntry(dataHome, canaryFile, desktopEntry(`Icon=${sharedIcon}`));
       expect(resolveLinuxDesktopIconName({ env, homeDir, flavor: "canary" })).toBeNull();
     }
   });

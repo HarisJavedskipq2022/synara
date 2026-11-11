@@ -13,6 +13,7 @@ import {
   normalizeFontFamilyCssValue,
   normalizeMonospaceFontFamilyCssValue,
 } from "../lib/fontFamily";
+import { fontFamilyListUsesGoogleFonts } from "../lib/googleFonts";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type ThemeVariant = "light" | "dark";
@@ -822,6 +823,20 @@ export function resolveThemeVariant(mode: ThemeMode, systemDark: boolean): Theme
     return systemDark ? "dark" : "light";
   }
   return mode;
+}
+
+/**
+ * Whether the fonts a theme applies name a Google Fonts family: the code font always applies,
+ * the UI font only while "Use system UI font" is off (matching the variables built below).
+ */
+export function themeUsesGoogleFonts(
+  pack: ThemePack,
+  options?: { readonly systemUiFont?: boolean | undefined },
+): boolean {
+  return (
+    fontFamilyListUsesGoogleFonts(pack.theme.fonts.code) ||
+    (!options?.systemUiFont && fontFamilyListUsesGoogleFonts(pack.theme.fonts.ui))
+  );
 }
 
 export function buildThemeCssVariables(

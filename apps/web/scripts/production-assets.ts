@@ -1,5 +1,6 @@
 // FILE: production-assets.ts
-// Purpose: Prune unreferenced production icons while retaining both visual variants.
+// Purpose: Prune unreferenced production icons while retaining both visual variants, and
+//          set the outline icons' stroke weight.
 // Layer: Web build helper (not imported by the client)
 
 import fs from "node:fs/promises";
@@ -63,4 +64,37 @@ export async function pruneProductionIcons(
       `[central-icons] ${directory}: retained ${retained.size}/${available.length}, pruned ${removed}.`,
     );
   }
+}
+
+/** The outline set's folder: the only one whose glyphs are drawn with strokes. */
+export const CENTRAL_OUTLINE_ICON_DIRECTORY = "central-icons-reversed";
+/**
+ * Stroke weight for the outline icons, in the icons' 24-unit box. The shipped files draw at
+ * 1.5, which lands near one pixel at the 16-20px sizes the app uses and reads thinner than
+ * Codex's icons. The files stay as shipped; the weight is applied when they are served (dev)
+ * and when they are copied into a build, so the icon set can be updated without re-editing it.
+ */
+export const CENTRAL_ICON_STROKE_WIDTH = "1.75";
+const SHIPPED_STROKE_WIDTH = /stroke-width="1\.5"/g;
+
+/** One outline icon at the app's stroke weight. Other weights in a glyph are details, kept. */
+export function applyCentralIconStrokeWidth(svg: string): string {
+  return svg.replace(SHIPPED_STROKE_WIDTH, `stroke-width="${CENTRAL_ICON_STROKE_WIDTH}"`);
+}
+
+/** Rewrites the built copies of the outline icons. Run before compression. */
+export async function applyProductionIconStrokeWidth(outputDirectory: string): Promise<void> {
+  const files = (
+    await listFiles(path.join(outputDirectory, CENTRAL_OUTLINE_ICON_DIRECTORY))
+  ).filter((file) => file.endsWith(".svg"));
+  await Promise.all(
+    files.map(async (file) => {
+      const source = await fs.readFile(file, "utf8");
+      const next = applyCentralIconStrokeWidth(source);
+      if (next !== source) await fs.writeFile(file, next);
+    }),
+  );
+  console.info(
+    `[central-icons] stroke width ${CENTRAL_ICON_STROKE_WIDTH} applied to ${files.length} icons.`,
+  );
 }

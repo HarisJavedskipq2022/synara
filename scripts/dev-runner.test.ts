@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 import {
   createDevRunnerEnv,
   findFirstAvailableOffset,
@@ -159,14 +160,17 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
-    it.effect("defaults watched desktop development to ~/.synara-dev", () =>
+    it.effect("defaults watched desktop development to the development identity's home", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           ...defaults,
           mode: "dev:desktop",
         });
 
-        assert.equal(env.SYNARA_HOME, resolve(homedir(), ".synara-dev"));
+        assert.equal(
+          env.SYNARA_HOME,
+          resolve(homedir(), synaraDesktopIdentity("development").defaultHomeDirectoryName),
+        );
       }),
     );
 

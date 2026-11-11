@@ -89,7 +89,10 @@ export function sortEntriesByVersionDesc(
  * pass the same shape it already has — no parameter juggling.
  */
 export interface WhatsNewInputs {
-  /** All changelog entries known at build time. Order is not assumed. */
+  /**
+   * Changelog entries to decide from; they must include the installed build's
+   * entry (at boot, `LATEST_WHATS_NEW_ENTRIES`). Order is not assumed.
+   */
   readonly entries: readonly WhatsNewEntry[];
   /** The currently installed app version (`import.meta.env.APP_VERSION`). */
   readonly currentVersion: string;

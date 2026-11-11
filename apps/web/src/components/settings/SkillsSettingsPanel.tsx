@@ -6,12 +6,18 @@
 
 import type { ProviderKind, ServerSettings } from "@synara/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { ProviderIcon } from "~/components/ProviderIcon";
-import { SettingsRow, SettingsSection } from "~/components/settings/SettingsPanelPrimitives";
+import {
+  SettingsListRow,
+  SettingsRow,
+  SettingsSection,
+} from "~/components/settings/SettingsPanelPrimitives";
+import { IconButton } from "~/components/ui/icon-button";
 import { Switch } from "~/components/ui/switch";
-import { SkillCubeIcon } from "~/lib/icons";
+import { ChevronRightIcon, SkillCubeIcon } from "~/lib/icons";
+import { cn } from "~/lib/utils";
 import { ensureNativeApi } from "~/nativeApi";
 import {
   providerDiscoveryQueryKeys,
@@ -22,6 +28,7 @@ import {
   buildSettingsSkillGroups,
   buildSettingsSkillSectionsFromGroups,
   providerDisplayName,
+  type SettingsSkillGroup,
   settingsSkillNameKey,
 } from "./skillsSettingsModel";
 import { useTranslation } from "~/i18n";
@@ -53,6 +60,74 @@ function SkillProviderStack({ providers }: { providers: ReadonlyArray<ProviderKi
         </span>
       ))}
     </span>
+  );
+}
+
+/**
+ * One skill as a compact row: icon tile, name and a one-line description, then the providers
+ * it comes from, its switch and a chevron. The chevron opens the full description and where
+ * each copy lives on disk, which would otherwise make every row several lines tall.
+ */
+function SkillRow({
+  group,
+  enabled,
+  onEnabledChange,
+}: {
+  group: SettingsSkillGroup;
+  enabled: boolean;
+  onEnabledChange: (enabled: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const detailsLabel = expanded
+    ? t("settings:skills_hideDetails")
+    : t("settings:skills_showDetails");
+  return (
+    <SettingsListRow
+      align={expanded ? "start" : "center"}
+      leading={
+        <span className="flex size-8 items-center justify-center rounded-lg bg-secondary text-foreground">
+          <SkillCubeIcon aria-hidden="true" className="size-4" />
+        </span>
+      }
+      title={group.displayName}
+      description={
+        expanded ? (
+          <span className="flex min-w-0 flex-col gap-1">
+            <span>{group.description}</span>
+            <span className="truncate text-ui-sm text-muted-foreground">
+              {group.sources.map((source) => source.originInfo.label).join(" · ")}
+            </span>
+            {group.sources.map((source) => (
+              <code key={source.skill.path} className="break-all text-ui-sm text-muted-foreground">
+                {source.skill.path}
+              </code>
+            ))}
+          </span>
+        ) : (
+          <span className="block truncate">{group.description}</span>
+        )
+      }
+      actions={
+        <>
+          <SkillProviderStack providers={group.providers} />
+          <Switch
+            checked={enabled}
+            onCheckedChange={(checked) => onEnabledChange(Boolean(checked))}
+            aria-label={t("settings:enableTheSkill", { value0: group.displayName })}
+          />
+          <IconButton
+            label={detailsLabel}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((previous) => !previous)}
+          >
+            <ChevronRightIcon
+              className={cn("size-3.5 transition-transform", expanded && "rotate-90")}
+            />
+          </IconButton>
+        </>
+      }
+    />
   );
 }
 
@@ -162,45 +237,11 @@ export function SkillsSettingsPanel() {
             {section.groups.map((group) => {
               const enabled = !disabledSkillNames.has(group.key);
               return (
-                <SettingsRow
+                <SkillRow
                   key={group.key}
-                  title={
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
-                      <SkillCubeIcon
-                        aria-hidden="true"
-                        className="size-3.5 shrink-0 text-muted-foreground"
-                      />
-                      <span className="truncate">{group.displayName}</span>
-                    </span>
-                  }
-                  description={group.description}
-                  status={
-                    <span className="flex min-w-0 flex-col gap-1">
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <SkillProviderStack providers={group.providers} />
-                        <span className="truncate text-ui-sm text-muted-foreground">
-                          {group.sources.map((source) => source.originInfo.label).join(" · ")}
-                        </span>
-                      </span>
-                      {group.sources.map((source) => (
-                        <code
-                          key={source.skill.path}
-                          className="truncate text-ui-sm text-muted-foreground"
-                        >
-                          {source.skill.path}
-                        </code>
-                      ))}
-                    </span>
-                  }
-                  control={
-                    <Switch
-                      checked={enabled}
-                      onCheckedChange={(checked) =>
-                        setSkillEnabled(group.primarySkill.name, Boolean(checked))
-                      }
-                      aria-label={t("settings:enableTheSkill", { value0: group.displayName })}
-                    />
-                  }
+                  group={group}
+                  enabled={enabled}
+                  onEnabledChange={(checked) => setSkillEnabled(group.primarySkill.name, checked)}
                 />
               );
             })}

@@ -136,6 +136,8 @@ export function SettingsSidebarNav(props: {
       <div className="mb-3 px-1">
         <SearchInput
           shape="capsule"
+          // A solid lighter pill on the dark sidebar, as Codex draws its settings search.
+          className="dark:bg-foreground/7!"
           value={query}
           spellCheck={false}
           autoCorrect="off"

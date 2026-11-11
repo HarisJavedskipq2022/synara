@@ -17,9 +17,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
-import { azureProvider } from "@earendil-works/pi-ai/providers/azure";
-import { isModelType } from "@earendil-works/pi-ai/utils/model-operations";
-import { resetApiProviders } from "@earendil-works/pi-ai/compat";
 import {
   ApprovalRequestId,
   type ChatAttachment,
@@ -93,7 +90,6 @@ import { makeKeyedLock } from "../keyedLock.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
 import { classifyPiTurnFailure } from "../piTurnFailure.ts";
 import { fetchOpenRouterModels, OPENROUTER_BASE_URL } from "../OpenRouterDiscovery.ts";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import {
   buildProviderProcessEnv,
   MODEL_PROVIDER_API_KEY_ENV_MAPPINGS,
@@ -397,6 +393,25 @@ export function makePiBashProcessSupervisor(
 const loadPiCodingAgentModule: () => Promise<PiCodingAgentModule> = lazyModule(
   () => import("@earendil-works/pi-coding-agent"),
 );
+
+// pi-ai's compat entry registers every built-in model API when it is evaluated
+// (about 80 ms in Node 24), so it loads with the first Pi use rather than at
+// server startup. pi-coding-agent imports these same module URLs, so the
+// registry that resetApiProviders() clears is still the one the SDK reads.
+const loadPiAiModules = lazyModule(async () => {
+  const [compat, azure, openrouter, modelOperations] = await Promise.all([
+    import("@earendil-works/pi-ai/compat"),
+    import("@earendil-works/pi-ai/providers/azure"),
+    import("@earendil-works/pi-ai/providers/openrouter"),
+    import("@earendil-works/pi-ai/utils/model-operations"),
+  ]);
+  return {
+    resetApiProviders: compat.resetApiProviders,
+    azureProvider: azure.azureProvider,
+    openrouterProvider: openrouter.openrouterProvider,
+    isModelType: modelOperations.isModelType,
+  };
+});
 
 interface PiSessionContext {
   harnessPolicyDelivered?: boolean;
@@ -1813,6 +1828,7 @@ export async function createPiModelRuntime(
 
   // Pi renamed Azure in 1.0.3. Keep saved profiles, credentials and session model IDs
   // working under their original key; models.json and extensions still compose on top.
+  const { azureProvider } = await loadPiAiModules();
   const azure = azureProvider();
   const legacyAzureModels = azure
     .getModels()
@@ -1851,6 +1867,7 @@ export async function refreshPiOpenRouterModels(
     return;
   const live = await fetchOpenRouterModels();
   if (live.length === 0) return;
+  const { openrouterProvider, isModelType } = await loadPiAiModules();
   const base = openrouterProvider();
   const models = new Map(base.getModels().map((model) => [model.id, model]));
   for (const model of live) models.set(model.id, model);
@@ -1997,6 +2014,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
     const preparePiDiscoveryMode = (
       environment: Readonly<Record<string, string>> | undefined,
       instanceId: string | undefined,
+      resetApiProviders: () => void,
     ) => {
       const isolatedAccount =
         environment !== undefined || (instanceId !== undefined && instanceId !== PROVIDER);
@@ -2011,7 +2029,10 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       instanceId: string | undefined,
       run: (noExtensions: boolean) => Promise<A>,
     ): Promise<A> => {
-      const reservation = preparePiDiscoveryMode(environment, instanceId);
+      // Load before reserving so the reservation and the registry reset stay one
+      // synchronous step, as they were when pi-ai was imported statically.
+      const { resetApiProviders } = await loadPiAiModules();
+      const reservation = preparePiDiscoveryMode(environment, instanceId, resetApiProviders);
       try {
         return await run(reservation.noExtensions);
       } finally {
@@ -2047,9 +2068,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       },
     );
 
-    const loadPiSdk = (method: string) =>
+    const loadPiModule = <M>(method: string, load: () => Promise<M>) =>
       Effect.tryPromise({
-        try: () => loadPiCodingAgentModule(),
+        try: load,
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -2058,6 +2079,8 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             cause,
           }),
       });
+    const loadPiSdk = (method: string) => loadPiModule(method, loadPiCodingAgentModule);
+    const loadPiAi = (method: string) => loadPiModule(method, loadPiAiModules);
 
     const makeEventBase = makePiRuntimeEventBase;
 
@@ -3354,8 +3377,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             sessions.delete(input.threadId);
           }
         }
+        const piAi = yield* loadPiAi("session/start");
         if (isolatedAccount) {
-          resetApiProviders();
+          piAi.resetApiProviders();
         }
         const piSdk = yield* loadPiSdk("session/start");
         const processSupervisor = makePiBashProcessSupervisor({

@@ -1,6 +1,7 @@
 // FILE: pairingBootstrap.ts
 // Purpose: Exchanges one-time remote pairing links before the application opens a WebSocket.
 import { t } from "~/i18n";
+import { ensureGoogleFontsStylesheet } from "~/lib/googleFonts";
 
 const PAIRING_PATH = "/pair";
 
@@ -28,6 +29,8 @@ function renderPairingFailure(): void {
   const root = document.getElementById("root");
   if (!root) return;
 
+  // The screen below is set in DM Sans and Geist Mono.
+  ensureGoogleFontsStylesheet();
   document.title = t("common:pairingFailedSynara");
   root.innerHTML = `
     <main role="alert" aria-live="assertive" style="min-height:100vh;box-sizing:border-box;display:grid;place-items:center;padding:32px;background:#10110f;color:#f3f0e8;font-family:'DM Sans',sans-serif">

@@ -5,7 +5,7 @@
 import { type ProviderKind, type ThreadId } from "@synara/contracts";
 import { memo, type ReactNode } from "react";
 
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { cn } from "~/lib/utils";
 import { useTranslation, t } from "~/i18n";
 
@@ -32,7 +32,7 @@ function OriginContent({ text }: { readonly text: string }): ReactNode {
   return (
     <>
       <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
-        <SynaraLogo className="h-4 w-auto" aria-label="Synara" />
+        <ArborLogo className="h-4 w-auto" aria-label="Arbor" />
       </span>
       <span className="truncate">{text}</span>
     </>

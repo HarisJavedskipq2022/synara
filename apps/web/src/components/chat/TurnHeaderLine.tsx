@@ -2,8 +2,6 @@
 // Collapsible trigger/panel; the live clock stays isolated in its leaf component.
 import type { CSSProperties, ReactNode } from "react";
 
-import { cn } from "~/lib/utils";
-import { MUTED_LABEL_TEXT_CLASS_NAME } from "~/surfaceStyles";
 import { DisclosureChevron } from "../ui/DisclosureChevron";
 import {
   formatTurnHeaderLabel,
@@ -13,6 +11,11 @@ import {
 } from "./MessagesTimeline.logic";
 import { LiveElapsedTimer } from "./LiveElapsedTimer";
 import { useTranslation } from "~/i18n";
+
+// "Worked for 2m 57s": a step quieter than other muted labels (about 46% ink), as Codex keeps
+// this line in the background above each answer. The disclosure trigger still lifts it to full
+// ink on hover.
+const TURN_HEADER_CLASS_NAME = "-ml-0.5 pb-2 text-muted-foreground/80";
 
 export function TurnHeaderLine(
   props: {
@@ -40,10 +43,7 @@ export function TurnHeaderLine(
     const resumedBy = props.resumedBy && props.resumedBy.length > 0 ? props.resumedBy : null;
     return (
       <div data-turn-header="live">
-        <div
-          className={cn("-ml-0.5 pb-2", MUTED_LABEL_TEXT_CLASS_NAME)}
-          style={{ fontSize: props.fontSize }}
-        >
+        <div className={TURN_HEADER_CLASS_NAME} style={{ fontSize: props.fontSize }}>
           {resumedBy
             ? t("chat:resumed", { value0: formatTurnResumedBy(resumedBy, t) })
             : t("chat:workingFor")}
@@ -67,7 +67,7 @@ export function TurnHeaderLine(
   );
   return (
     <div
-      className={cn("-ml-0.5 pb-2", MUTED_LABEL_TEXT_CLASS_NAME)}
+      className={TURN_HEADER_CLASS_NAME}
       style={{ fontSize: props.fontSize }}
       data-turn-header={header.outcome}
     >

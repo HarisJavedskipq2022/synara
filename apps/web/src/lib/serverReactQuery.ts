@@ -17,6 +17,7 @@ import {
   shouldRetryExpensiveRead,
 } from "./expensiveReadRetry";
 import { withWorkspaceKeybindings } from "./hosts/workspaceKeybindings";
+import { invalidateModelsAfterSignIn } from "./providerDiscoveryReactQuery";
 
 export const LOCAL_SERVERS_VISIBLE_REFETCH_INTERVAL_MS = 10_000;
 const LOCAL_SERVERS_DEFAULT_STALE_TIME_MS = 3_000;
@@ -188,15 +189,19 @@ export async function reconcileServerProviderStatuses(
   }
 
   let applied = false;
+  let appliedProviders: readonly ServerProviderStatus[] = [];
   queryClient.setQueryData<ServerConfig>(serverQueryKeys.config(), (current) => {
     if (!current) return current;
     applied = true;
-    return {
-      ...current,
-      providers: mergeProviderStatusSnapshots(current.providers, effectiveProviders),
-    };
+    appliedProviders = mergeProviderStatusSnapshots(current.providers, effectiveProviders);
+    return { ...current, providers: appliedProviders };
   });
-  if (applied) return;
+  if (applied) {
+    // A sign-in finished outside the app: refetch the provider's gated models
+    // now instead of leaving its "not signed in" result until the next focus.
+    invalidateModelsAfterSignIn(queryClient, currentConfig?.providers, appliedProviders);
+    return;
+  }
 
   const loadConfig =
     options?.loadConfig ??

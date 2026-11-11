@@ -8,9 +8,12 @@
 
 import type {
   DesktopAppSnapWindowEntry,
+  JiraIssueDetail,
+  JiraIssueSummary,
   ProviderInteractionMode,
   ThreadId,
 } from "@synara/contracts";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 
 import {
@@ -20,11 +23,15 @@ import {
   ChevronRightIcon,
   FastModeIcon,
   GoalIcon,
+  IssueOpenedIcon,
   ListTodoIcon,
   PaperclipIcon,
   WindowIcon,
 } from "~/lib/icons";
+import { jiraIssuesQueryOptions, jiraStatusQueryOptions } from "~/lib/jiraQueryOptions";
 import { cn } from "~/lib/utils";
+import { ensureNativeApi } from "~/nativeApi";
+import { toastManager } from "../ui/toast";
 import {
   COMPOSER_MENU_PANEL_GLYPH_CLASS_NAME,
   ComposerMenuPanel,
@@ -46,7 +53,9 @@ const ROW_PLAN = "extras:mode:plan";
 const ROW_DEBUG = "extras:mode:debug";
 const ROW_FAST = "extras:fast";
 const ROW_BACK = "extras:back";
+const ROW_JIRA = "extras:jira";
 const WINDOW_ROW_PREFIX = "extras:window:";
+const JIRA_ROW_PREFIX = "extras:jira:";
 
 const CHECK = <CheckIcon className="size-3.5 text-foreground/70" />;
 
@@ -72,6 +81,8 @@ export function ComposerExtrasPanel(props: {
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
   /** Turns the draft into a `/goal` command so the goal chip flow is the same as typing it. */
   onInsertGoal: () => void;
+  /** Attaches a Jira ticket to the draft. Absent: the panel offers no Jira row. */
+  onAttachJiraIssue?: (issue: JiraIssueDetail) => void;
   onClose: () => void;
   panelId: string;
 }) {
@@ -80,7 +91,8 @@ export function ComposerExtrasPanel(props: {
   const inputId = useId();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [view, setView] = useState<"root" | "windows">("root");
+  const [view, setView] = useState<"root" | "windows" | "jira">("root");
+  const [attachingJiraKey, setAttachingJiraKey] = useState<string | null>(null);
   const [activeRowId, setActiveRowId] = useState<string | null>(ROW_FILES);
 
   // Listed while the panel is open (not only in the window view) so the root row can
@@ -104,106 +116,172 @@ export function ComposerExtrasPanel(props: {
     setActiveRowId(ROW_BACK);
   };
   const goBack = () => {
+    setActiveRowId(view === "jira" ? ROW_JIRA : ROW_WINDOW);
     setView("root");
-    setActiveRowId(ROW_WINDOW);
+  };
+
+  // Read only once the Jira view is open, so opening the panel never calls Jira.
+  const jiraOpen = view === "jira";
+  const jiraStatus = useQuery(jiraStatusQueryOptions({ enabled: jiraOpen }));
+  const jiraIssues = useQuery(
+    jiraIssuesQueryOptions("assigned", {
+      enabled: jiraOpen && jiraStatus.data?.connected === true,
+    }),
+  );
+  const openJira = () => {
+    setView("jira");
+    setActiveRowId(ROW_BACK);
+  };
+  // Promise chain instead of async/try-finally: React Compiler does not yet support
+  // try/finally and would skip this component.
+  const attachJiraIssue = (key: string) => {
+    if (attachingJiraKey !== null) return;
+    setAttachingJiraKey(key);
+    void ensureNativeApi()
+      .jira.issue({ key })
+      .then((issue) => {
+        props.onAttachJiraIssue?.(issue);
+        props.onClose();
+      })
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: t("chat:couldNotAttachTheJiraTicket"),
+          description: error instanceof Error ? error.message : t("chat:tryAgain"),
+        });
+      })
+      .finally(() => setAttachingJiraKey(null));
   };
 
   const groups: ComposerMenuPanelGroup[] =
-    view === "windows"
+    view === "jira"
       ? [
           {
-            id: "windows",
-            label: t("chat:attachWindow"),
+            id: "jira",
+            label: t("chat:jiraTickets"),
             rows: [
               {
                 id: ROW_BACK,
                 icon: <ArrowLeftIcon className={GLYPH} />,
                 title: t("common:app_back"),
               },
-              ...appSnapWindowRows(appSnap),
+              ...jiraIssueRows({
+                connected: jiraStatus.data?.connected,
+                statusMessage: jiraStatus.data?.message ?? null,
+                loading: jiraStatus.isPending || (jiraIssues.isPending && jiraIssues.isEnabled),
+                error: jiraIssues.error,
+                issues: jiraIssues.data?.issues ?? null,
+                attachingKey: attachingJiraKey,
+              }),
             ],
           },
         ]
-      : [
-          {
-            id: "add",
-            label: t("workspace:models_add"),
-            rows: [
-              {
-                id: ROW_FILES,
-                icon: <PaperclipIcon className={GLYPH} />,
-                title: t("chat:filesAndFolders"),
-              },
-              ...(appSnap.available
-                ? [
-                    frontmostWindow
-                      ? {
-                          id: ROW_WINDOW,
-                          icon: windowGlyph(frontmostWindow),
-                          title: t("chat:attach", {
-                            value0: frontmostWindow.appName?.trim() || t("chat:window"),
-                          }),
-                          disabled: appSnap.busy,
-                          trailing: (
-                            <button
-                              type="button"
-                              aria-label={t("chat:chooseAnotherWindow")}
-                              className={cn(
-                                "-mr-1 flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-colors",
-                                "hover:bg-[var(--color-background-button-secondary)] hover:text-foreground/80",
-                              )}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openWindows();
-                              }}
-                            >
-                              <ChevronRightIcon className="size-3.5" />
-                            </button>
-                          ),
-                        }
-                      : {
-                          id: ROW_WINDOW,
-                          icon: <WindowIcon className={GLYPH} />,
-                          title: t("chat:attachWindow"),
-                          secondary: "Capture an open app window",
-                          trailing: <ChevronRightIcon className="size-3.5" />,
-                        },
-                  ]
-                : []),
-              {
-                id: ROW_GOAL,
-                icon: <GoalIcon className={GLYPH} />,
-                title: t("chat:goal"),
-                secondary: "Set a goal to keep pursuing",
-              },
-              {
-                id: ROW_PLAN,
-                icon: <ListTodoIcon className={GLYPH} />,
-                title: t("chat:composerExtras_planMode"),
-                secondary: toggleSecondary("plan mode", props.interactionMode === "plan"),
-                trailing: props.interactionMode === "plan" ? CHECK : null,
-              },
-              {
-                id: ROW_DEBUG,
-                icon: <BugIcon className={GLYPH} />,
-                title: t("chat:debugMode2"),
-                secondary: toggleSecondary("debug mode", props.interactionMode === "debug"),
-                trailing: props.interactionMode === "debug" ? CHECK : null,
-              },
-              ...(props.supportsFastMode
-                ? [
-                    {
-                      id: ROW_FAST,
-                      icon: <FastModeIcon className={GLYPH} />,
-                      title: t("chat:sessionStatus_fastMode"),
-                      secondary: toggleSecondary("fast mode", props.fastModeEnabled),
-                      trailing: props.fastModeEnabled ? CHECK : null,
-                    },
-                  ]
-                : []),
-            ],
-          },
-        ];
+      : view === "windows"
+        ? [
+            {
+              id: "windows",
+              label: t("chat:attachWindow"),
+              rows: [
+                {
+                  id: ROW_BACK,
+                  icon: <ArrowLeftIcon className={GLYPH} />,
+                  title: t("common:app_back"),
+                },
+                ...appSnapWindowRows(appSnap),
+              ],
+            },
+          ]
+        : [
+            {
+              id: "add",
+              label: t("workspace:models_add"),
+              rows: [
+                {
+                  id: ROW_FILES,
+                  icon: <PaperclipIcon className={GLYPH} />,
+                  title: t("chat:filesAndFolders"),
+                },
+                ...(appSnap.available
+                  ? [
+                      frontmostWindow
+                        ? {
+                            id: ROW_WINDOW,
+                            icon: windowGlyph(frontmostWindow),
+                            title: t("chat:attach", {
+                              value0: frontmostWindow.appName?.trim() || t("chat:window"),
+                            }),
+                            disabled: appSnap.busy,
+                            trailing: (
+                              <button
+                                type="button"
+                                aria-label={t("chat:chooseAnotherWindow")}
+                                className={cn(
+                                  "-mr-1 flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-colors",
+                                  "hover:bg-[var(--color-background-button-secondary)] hover:text-foreground/80",
+                                )}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openWindows();
+                                }}
+                              >
+                                <ChevronRightIcon className="size-3.5" />
+                              </button>
+                            ),
+                          }
+                        : {
+                            id: ROW_WINDOW,
+                            icon: <WindowIcon className={GLYPH} />,
+                            title: t("chat:attachWindow"),
+                            secondary: "Capture an open app window",
+                            trailing: <ChevronRightIcon className="size-3.5" />,
+                          },
+                    ]
+                  : []),
+                ...(props.onAttachJiraIssue
+                  ? [
+                      {
+                        id: ROW_JIRA,
+                        icon: <IssueOpenedIcon className={GLYPH} />,
+                        title: t("chat:jiraTicket"),
+                        secondary: t("chat:attachATicketForTheAgent"),
+                        trailing: <ChevronRightIcon className="size-3.5" />,
+                      },
+                    ]
+                  : []),
+                {
+                  id: ROW_GOAL,
+                  icon: <GoalIcon className={GLYPH} />,
+                  title: t("chat:goal"),
+                  secondary: "Set a goal to keep pursuing",
+                },
+                {
+                  id: ROW_PLAN,
+                  icon: <ListTodoIcon className={GLYPH} />,
+                  title: t("chat:composerExtras_planMode"),
+                  secondary: toggleSecondary("plan mode", props.interactionMode === "plan"),
+                  trailing: props.interactionMode === "plan" ? CHECK : null,
+                },
+                {
+                  id: ROW_DEBUG,
+                  icon: <BugIcon className={GLYPH} />,
+                  title: t("chat:debugMode2"),
+                  secondary: toggleSecondary("debug mode", props.interactionMode === "debug"),
+                  trailing: props.interactionMode === "debug" ? CHECK : null,
+                },
+                ...(props.supportsFastMode
+                  ? [
+                      {
+                        id: ROW_FAST,
+                        icon: <FastModeIcon className={GLYPH} />,
+                        title: t("chat:sessionStatus_fastMode"),
+                        secondary: toggleSecondary("fast mode", props.fastModeEnabled),
+                        trailing: props.fastModeEnabled ? CHECK : null,
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ];
 
   const selectableRowIds = groups.flatMap((group) =>
     group.rows.filter((row) => !row.disabled).map((row) => row.id),
@@ -230,6 +308,14 @@ export function ComposerExtrasPanel(props: {
     }
     if (rowId === ROW_BACK) {
       goBack();
+      return;
+    }
+    if (rowId === ROW_JIRA) {
+      openJira();
+      return;
+    }
+    if (rowId.startsWith(JIRA_ROW_PREFIX)) {
+      attachJiraIssue(rowId.slice(JIRA_ROW_PREFIX.length));
       return;
     }
     if (rowId === ROW_GOAL) {
@@ -267,11 +353,18 @@ export function ComposerExtrasPanel(props: {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        if (view === "windows") {
+        if (view !== "root") {
           goBack();
         } else {
           props.onClose();
         }
+        return;
+      }
+
+      if (event.key === "ArrowRight" && view === "root" && highlightedRowId === ROW_JIRA) {
+        event.preventDefault();
+        event.stopPropagation();
+        openJira();
         return;
       }
 
@@ -281,7 +374,7 @@ export function ComposerExtrasPanel(props: {
         openWindows();
         return;
       }
-      if (event.key === "ArrowLeft" && view === "windows") {
+      if (event.key === "ArrowLeft" && view !== "root") {
         event.preventDefault();
         event.stopPropagation();
         goBack();
@@ -388,5 +481,37 @@ function appSnapWindowRows(appSnap: ReturnType<typeof useAppSnapWindows>): Compo
     title: entry.appName?.trim() || t("chat:capturedApp"),
     secondary: entry.windowTitle?.trim() || null,
     disabled: appSnap.busy,
+  }));
+}
+
+function jiraStatusRow(title: string): ComposerMenuPanelRow[] {
+  return [{ id: "extras:jira-status", title, disabled: true }];
+}
+
+function jiraIssueRows(input: {
+  connected: boolean | undefined;
+  statusMessage: string | null;
+  loading: boolean;
+  error: unknown;
+  issues: ReadonlyArray<JiraIssueSummary> | null;
+  attachingKey: string | null;
+}): ComposerMenuPanelRow[] {
+  if (input.connected === false) {
+    return jiraStatusRow(input.statusMessage ?? t("chat:connectJiraInSettingsToListYourTickets"));
+  }
+  if (input.error) {
+    return jiraStatusRow(
+      input.error instanceof Error ? input.error.message : t("chat:couldNotLoadJiraTickets"),
+    );
+  }
+  if (input.loading || input.issues === null) return jiraStatusRow(t("chat:loadingTickets"));
+  if (input.issues.length === 0) return jiraStatusRow(t("chat:noOpenTicketsAreAssignedToYou"));
+
+  return input.issues.map((issue) => ({
+    id: `${JIRA_ROW_PREFIX}${issue.key}`,
+    icon: <IssueOpenedIcon className={GLYPH} />,
+    title: `${issue.key} ${issue.summary}`,
+    secondary: issue.status || null,
+    disabled: input.attachingKey !== null,
   }));
 }

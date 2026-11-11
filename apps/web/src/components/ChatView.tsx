@@ -10,6 +10,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ThreadId,
   type AutomationDefinition,
+  type JiraIssueDetail,
   type EditorId,
   type ModelSelection,
   type ModelSlug,
@@ -160,7 +161,8 @@ import {
 import { formatShortcutLabel, shortcutLabelForCommand } from "../keybindings";
 import { isHomeChatContainerProject } from "../lib/chatProjects";
 import { isGroupContainerProject } from "../lib/groupProjects";
-import { appendComposerPromptText } from "../lib/chatReferences";
+import { addChatPullRequestContext, appendComposerPromptText } from "../lib/chatReferences";
+import { createJiraIssueContextDraft, jiraIssueThreadTitle } from "../lib/jiraIssueContext";
 import { createPastedTextDraft } from "../lib/composerPastedText";
 import {
   buildComposerFileAttachmentsFromFiles,
@@ -304,9 +306,8 @@ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { hasUnseenSnoozeReturn } from "./Sidebar.logic";
 import { SidebarHeaderNavigationControls } from "./SidebarHeaderNavigationControls";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { AsciiWaveBackground } from "./chat/AsciiWaveBackground";
-import { SponsorLandingBanner } from "./SponsorLandingBanner";
 import TerminalWorkspaceTabs from "./TerminalWorkspaceTabs";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
 
@@ -700,6 +701,8 @@ export default function ChatView({
   const {
     composerDraft,
     prompt,
+    promptTraitKey,
+    getPrompt: getComposerPrompt,
     composerImages,
     composerFiles,
     composerAssistantSelections,
@@ -4896,10 +4899,12 @@ export default function ChatView({
     [promptRef, setComposerCursor, setComposerTrigger, scheduleComposerFocus, setPrompt],
   );
   const selectedProviderModelOptions = composerModelOptions?.[selectedProvider];
+  // Trait resolution reads only whether the prompt carries Ultrathink, so the trait
+  // surfaces (and the model picker) are keyed on that and stay still while the user types.
   const composerTraitSelection = getComposerTraitSelection(
     selectedProvider,
     selectedModel,
-    prompt,
+    promptTraitKey,
     selectedProviderModelOptions,
     selectedRuntimeModel,
     t,
@@ -5011,7 +5016,7 @@ export default function ChatView({
     {
       provider: selectedProvider,
       model: selectedModelForPickerWithCustomFallback,
-      prompt,
+      prompt: promptTraitKey,
       modelOptions: selectedProviderModelOptions,
       ...(selectedRuntimeModel ? { runtimeModel: selectedRuntimeModel } : {}),
       runtimeAgents: dynamicAgents,
@@ -5100,7 +5105,8 @@ export default function ChatView({
       runtimeModelsByProvider={runtimeModelsByProvider}
       runtimeAgents={dynamicAgents}
       modelOptions={selectedProviderModelOptions}
-      prompt={prompt}
+      promptTraitKey={promptTraitKey}
+      getPrompt={getComposerPrompt}
       onPromptChange={setPromptFromTraits}
       onProviderModelChange={handleProviderModelChange}
       onSelectionCommitted={scheduleComposerFocus}
@@ -5687,7 +5693,13 @@ export default function ChatView({
   const previewLayout = useComputerPreviewStore(selectThreadComputerPreviewLayout(threadId));
   const mainContentRef = useRef<HTMLDivElement | null>(null);
   const [mainContentWidth, setMainContentWidth] = useState(1600);
-  useEffect(() => {
+  // Only the computer preview reads this width (its budget and the inset it reserves), so
+  // it is observed only while a preview session exists: otherwise every frame of a sidebar
+  // or panel animation re-rendered all of ChatView. A layout effect measures before paint,
+  // so a preview that starts is never painted with a stale width.
+  const observesMainContentWidth = previewSession != null;
+  useLayoutEffect(() => {
+    if (!observesMainContentWidth) return;
     const element = mainContentRef.current;
     if (!element) return;
     const update = () => {
@@ -5698,7 +5710,7 @@ export default function ChatView({
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [observesMainContentWidth]);
   const composerEffortOptionId = composerTraitSelection.primarySelectDescriptor?.id ?? "effort";
   const applyComputerControlEffortHint = useCallback(() => {
     setComposerDraftProviderModelOptions(
@@ -5867,6 +5879,13 @@ export default function ChatView({
     if (outcome === "unchanged" || outcome === "unavailable") {
       return;
     }
+  };
+
+  // A ticket attached before the first message names the thread, as starting from it implies;
+  // a thread already under way keeps its title.
+  const attachJiraIssueToComposer = (issue: JiraIssueDetail) => {
+    if (!addChatPullRequestContext(activeThread.id, createJiraIssueContextDraft(issue))) return;
+    if (isLocalDraftThread) void handleRenameActiveThread(jiraIssueThreadTitle(issue));
   };
 
   const runtimeUsageControlsProps = {
@@ -6148,6 +6167,7 @@ export default function ChatView({
   // Shared inputs for both Environment panel surfaces (the header Popover when the dock is
   // open, and the docked right column when it is closed) so the two never drift.
   const environmentPanelProps: Omit<EnvironmentPanelProps, "open" | "variant"> = {
+    projectName: activeProjectDisplayName ?? null,
     gitCwd: threadWorkspaceCwd,
     openInTarget: threadWorkspaceCwd,
     githubRepository: githubRepositoryQuery.data?.repository ?? null,
@@ -6590,6 +6610,7 @@ export default function ChatView({
                         onToggleFastMode={toggleFastMode}
                         onInteractionModeChange={handleInteractionModeChange}
                         onInsertGoal={insertGoalSlashCommandInComposer}
+                        onAttachJiraIssue={attachJiraIssueToComposer}
                         onClose={() => {
                           setIsComposerExtrasPanelOpen(false);
                           scheduleComposerFocus();
@@ -7002,18 +7023,13 @@ export default function ChatView({
                     stacked on top of the input) so starting a chat keeps the composer
                     where it lives for the rest of the conversation. */}
                 <div className="relative flex min-h-0 flex-1 items-center justify-center">
-                  {/* Pinned to the top so the heading stays optically centered; hidden on
-                      short panes where it would crowd the heading. */}
-                  <div className="absolute inset-x-0 top-4 flex justify-center px-6 [@media(max-height:620px)]:hidden">
-                    <SponsorLandingBanner className="w-full max-w-[520px]" />
-                  </div>
                   <div
                     className={cn(
                       "flex flex-col items-center gap-4 px-6 text-center select-none",
                       CHAT_COLUMN_FRAME_CLASS_NAME,
                     )}
                   >
-                    <SynaraLogo aria-label={t("chat:chat_synaraLogo")} className="size-10" />
+                    <ArborLogo aria-label={t("chat:chat_synaraLogo")} className="size-10" />
                     <h2
                       data-testid="empty-landing-heading"
                       // A combobox contributes its (empty) value, not its text, to the

@@ -199,7 +199,13 @@ export function SettingsListRow({
       >
         <div className="flex min-w-0 flex-1 items-center gap-3">
           {leading != null ? (
-            <span className="flex size-8 shrink-0 items-center justify-center text-muted-foreground">
+            <span
+              className={cn(
+                "flex size-8 shrink-0 items-center justify-center text-muted-foreground",
+                // A tall, top-aligned row keeps its glyph beside the title, not mid-body.
+                align === "start" && "self-start",
+              )}
+            >
               {leading}
             </span>
           ) : null}

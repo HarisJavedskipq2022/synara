@@ -20,10 +20,10 @@ import {
 } from "@synara/contracts";
 import { isLocalAbsolutePath } from "@synara/shared/path";
 import type { ChatAttachment } from "~/types";
-import "katex/dist/katex.min.css";
 import { matchWikiLinkAt, remarkWikiLinks } from "../lib/remarkWikiLinks";
 import { remarkGithubAlerts, type GithubAlertKind } from "../lib/remarkGithubAlerts";
 import { remarkHtmlBreaks } from "../lib/remarkHtmlBreaks";
+import { KATEX_PENDING_CLASS_NAME, useLazyRehypeKatexPlugin } from "../lib/lazyRehypeKatex";
 import React, {
   Children,
   createContext,
@@ -45,7 +45,6 @@ import React, {
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
-import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
@@ -378,10 +377,13 @@ function rehypeRestoreLiteralDollars() {
   };
 }
 
-const MARKDOWN_REHYPE_PLUGINS: MarkdownRehypePlugins = [
-  [rehypeKatex, { output: "htmlAndMathml", strict: false, throwOnError: false }],
-  rehypeRestoreLiteralDollars,
-];
+// KaTeX loads with the first message that contains math (see lazyRehypeKatex);
+// `useLazyRehypeKatexPlugin` supplies the entry that stands in for rehype-katex.
+function createMarkdownRehypePlugins(
+  lazyKatexPlugin: ReturnType<typeof useLazyRehypeKatexPlugin>,
+): MarkdownRehypePlugins {
+  return [lazyKatexPlugin, rehypeRestoreLiteralDollars];
+}
 
 type BidiHastNode = {
   type?: string;
@@ -404,7 +406,9 @@ function applyNestedBidiOwners(node: BidiHastNode): void {
     } else if (
       node.tagName === "pre" ||
       node.tagName === "table" ||
-      (Array.isArray(node.properties?.className) && node.properties.className.includes("katex")) ||
+      (Array.isArray(node.properties?.className) &&
+        (node.properties.className.includes("katex") ||
+          node.properties.className.includes(KATEX_PENDING_CLASS_NAME))) ||
       node.properties?.className === "katex"
     ) {
       // Code, tables, and rendered math retain source/LTR ordering and must
@@ -1804,6 +1808,9 @@ function ChatMarkdown({
       remarkFindableText,
     ];
   }, [composerChipsRemarkPlugin, wikiLinkRoot, cwd]);
+  // Stable per message; changes once if KaTeX finishes loading after this
+  // message rendered math placeholders, so its blocks re-parse exactly once.
+  const lazyKatexPlugin = useLazyRehypeKatexPlugin();
   const rehypePlugins = useMemo<MarkdownRehypePlugins>(() => {
     // Raw HTML is only enabled for authored local-file previews. Sanitize
     // immediately after parsing so scripts, event handlers, and unsafe URL
@@ -1811,10 +1818,14 @@ function ChatMarkdown({
     const basePlugins: MarkdownRehypePlugins = isUserVariant
       ? USER_MARKDOWN_REHYPE_PLUGINS
       : parseHtml
-        ? [rehypeRaw, [rehypeSanitize, AUTHORED_HTML_SCHEMA], ...MARKDOWN_REHYPE_PLUGINS]
-        : MARKDOWN_REHYPE_PLUGINS;
+        ? [
+            rehypeRaw,
+            [rehypeSanitize, AUTHORED_HTML_SCHEMA],
+            ...createMarkdownRehypePlugins(lazyKatexPlugin),
+          ]
+        : createMarkdownRehypePlugins(lazyKatexPlugin);
     return usesAutomaticBlockDirection ? [...basePlugins, rehypeBidiBlockDirection] : basePlugins;
-  }, [isUserVariant, parseHtml, usesAutomaticBlockDirection]);
+  }, [isUserVariant, parseHtml, usesAutomaticBlockDirection, lazyKatexPlugin]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     applyActiveChatFindMatch(rootRef.current, findActiveRange);

@@ -28,8 +28,8 @@ import {
 
 describe("desktopIdentity", () => {
   it("uses the exact canonical production and development bundle IDs", () => {
-    expect(SYNARA_PRODUCTION_BUNDLE_ID).toBe("com.emanueledipietro.synara");
-    expect(SYNARA_DEVELOPMENT_BUNDLE_ID).toBe("com.emanueledipietro.synara.dev");
+    expect(SYNARA_PRODUCTION_BUNDLE_ID).toBe("dev.arbor.app");
+    expect(SYNARA_DEVELOPMENT_BUNDLE_ID).toBe("dev.arbor.app.dev");
     expect(synaraDesktopIdentity("production").bundleId).toBe(SYNARA_PRODUCTION_BUNDLE_ID);
     expect(synaraDesktopIdentity("development").bundleId).toBe(SYNARA_DEVELOPMENT_BUNDLE_ID);
   });
@@ -69,7 +69,7 @@ describe("desktopIdentity", () => {
   });
 
   it("gives Canary a fully separate desktop identity and storage profile", () => {
-    expect(SYNARA_CANARY_BUNDLE_ID).toBe("com.emanueledipietro.synara.canary");
+    expect(SYNARA_CANARY_BUNDLE_ID).toBe("dev.arbor.app.canary");
     expect(SYNARA_CANARY_DESKTOP_ORIGIN).toBe("synara-canary://app");
     expect(SYNARA_CANARY_DESKTOP_ENTRY_URL).toBe("synara-canary://app/index.html");
     expect(synaraDesktopIdentity("canary")).toEqual({
@@ -86,7 +86,7 @@ describe("desktopIdentity", () => {
   });
 
   it("gives Cua a fully separate desktop identity and storage profile", () => {
-    expect(SYNARA_CUA_BUNDLE_ID).toBe("com.emanueledipietro.synara.cua");
+    expect(SYNARA_CUA_BUNDLE_ID).toBe("dev.arbor.app.cua");
     expect(SYNARA_CUA_DESKTOP_ORIGIN).toBe("synara-cua://app");
     expect(SYNARA_CUA_DESKTOP_ENTRY_URL).toBe("synara-cua://app/index.html");
     expect(synaraDesktopIdentity("cua")).toEqual({
@@ -103,7 +103,7 @@ describe("desktopIdentity", () => {
   });
 
   it("gives Beta a fully separate desktop identity and storage profile", () => {
-    expect(SYNARA_BETA_BUNDLE_ID).toBe("com.emanueledipietro.synara.beta");
+    expect(SYNARA_BETA_BUNDLE_ID).toBe("dev.arbor.app.beta");
     expect(SYNARA_BETA_DESKTOP_ORIGIN).toBe("synara-beta://app");
     expect(SYNARA_BETA_DESKTOP_ENTRY_URL).toBe("synara-beta://app/index.html");
     expect(synaraDesktopIdentity("beta")).toEqual({
@@ -123,7 +123,7 @@ describe("desktopIdentity", () => {
     expect(synaraDesktopIdentity("remote")).toEqual({
       flavor: "remote",
       displayName: "Synara Remote",
-      bundleId: "com.emanueledipietro.synara.remote",
+      bundleId: "dev.arbor.app.remote",
       scheme: "synara-remote",
       origin: "synara-remote://app",
       entryUrl: "synara-remote://app/index.html",
@@ -132,7 +132,7 @@ describe("desktopIdentity", () => {
       defaultAccountUrl: "https://synara-account-api-trial.synara-orgs.workers.dev",
       usesScriptedUpdates: false,
     });
-    expect(SYNARA_REMOTE_BUNDLE_ID).toBe("com.emanueledipietro.synara.remote");
+    expect(SYNARA_REMOTE_BUNDLE_ID).toBe("dev.arbor.app.remote");
     expect(resolveSynaraDesktopFlavor({ isDevelopment: false, requestedFlavor: "remote" })).toBe(
       "remote",
     );
@@ -173,11 +173,11 @@ describe("desktopIdentity", () => {
   });
 
   it("isolates development and Canary homes from packaged Stable", () => {
-    expect(synaraDesktopIdentity("development").defaultHomeDirectoryName).toBe(".synara-dev");
+    expect(synaraDesktopIdentity("development").defaultHomeDirectoryName).toBe(".arbor-app-dev");
     expect(synaraDesktopIdentity("canary").defaultHomeDirectoryName).toBe(".synara-canary");
     expect(synaraDesktopIdentity("cua").defaultHomeDirectoryName).toBe(".synara-cua");
     expect(synaraDesktopIdentity("beta").defaultHomeDirectoryName).toBe(".synara-beta");
-    expect(synaraDesktopIdentity("production").defaultHomeDirectoryName).toBe(".synara");
+    expect(synaraDesktopIdentity("production").defaultHomeDirectoryName).toBe(".arbor-app");
   });
 
   it.each(["production", "canary", "cua", "beta", "remote"] as const)(

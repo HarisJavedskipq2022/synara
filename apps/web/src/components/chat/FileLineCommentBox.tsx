@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import { FILE_COMMENT_TEXT_MAX_CHARS, normalizeFileCommentText } from "~/lib/fileComments";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { Button } from "../ui/button";
 import { useTranslation } from "~/i18n";
 
@@ -74,7 +74,7 @@ export function FileLineCommentBox(props: FileLineCommentBoxProps) {
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-2 text-ui-lg font-semibold text-[var(--color-text-foreground)]">
           <span className="editor-file-viewer__comment-badge">
-            <SynaraLogo className="size-3 text-[var(--color-text-foreground-secondary)]" />
+            <ArborLogo className="size-3 text-[var(--color-text-foreground-secondary)]" />
           </span>
           {t("chat:fileLineComment_localComment")}
         </span>

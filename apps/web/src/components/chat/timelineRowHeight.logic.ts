@@ -11,8 +11,8 @@ import { getChatTranscriptUserMessageLineHeightPx } from "./chatTypography";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import { USER_MESSAGE_COLLAPSED_MAX_LINES } from "./userMessageCollapse";
 
-/** The default 46rem chat column; used until a rendered row reports its real width. */
-export const DEFAULT_TIMELINE_ROW_WIDTH_PX = 736;
+/** The default 42.5rem chat column; used until a rendered row reports its real width. */
+export const DEFAULT_TIMELINE_ROW_WIDTH_PX = 680;
 // Estimate invisible rows from a bounded sample; never scan the full transcript text.
 const MAX_TEXT_SAMPLE_CHARS = 4096;
 
@@ -24,7 +24,8 @@ export interface TimelineRowHeightLayout {
 }
 
 // Calibrated against measured rows of real transcripts at the default 13px chat font
-// and the 46rem column: median error about 3%, total transcript height within 1%.
+// and a 46rem column: median error about 3%, total transcript height within 1%. The
+// estimate scales with the reported row width, so it holds for the narrower default too.
 const GLYPH_WIDTH_EM = 0.5;
 const PROSE_LINE_HEIGHT_EM = 1.7;
 const PARAGRAPH_GAP_EM = 1.4;

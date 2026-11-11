@@ -6,7 +6,7 @@
 //          reserves transcript/composer inset; when the dock is open it overlays only.
 // Layer: Chat header control
 
-import { PanelTopOpenIcon } from "~/lib/icons";
+import { EnvironmentPanelIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
 
 import { Toggle } from "../../ui/toggle";
@@ -19,10 +19,12 @@ export interface EnvironmentToggleState {
   onOpenChange: (open: boolean) => void;
 }
 
-// Icon-only footprint matching the header diff toggle's collapsed (no-badge) size.
+// A square tile, as in Codex: while the panel is open the tile is filled and the glyph is at
+// full ink, so the button reads as "on" beside the plain header icons.
 const TOGGLE_CLASS_NAME = cn(
   CHAT_HEADER_TOGGLE_CLASS_NAME,
-  "!size-7 [&_svg,&_[data-slot=central-icon]]:mx-0",
+  "!size-8 rounded-lg [&_svg,&_[data-slot=central-icon]]:mx-0",
+  "data-pressed:bg-[color-mix(in_srgb,var(--foreground)_10%,transparent)]",
 );
 
 export function EnvironmentToggle({ environment }: { environment: EnvironmentToggleState }) {
@@ -40,7 +42,10 @@ export function EnvironmentToggle({ environment }: { environment: EnvironmentTog
             variant="default"
             size="xs"
           >
-            <SurfaceChipIcon icon={PanelTopOpenIcon} className="size-4" />
+            <SurfaceChipIcon
+              icon={EnvironmentPanelIcon}
+              className="size-5 in-data-pressed:opacity-100"
+            />
           </Toggle>
         }
       />

@@ -68,6 +68,7 @@ import {
 } from "./ComposerModelPickerTraitRows";
 import { ComposerPickerMenuPopup } from "./ComposerPickerMenuPopup";
 import { COMPOSER_PICKER_MODEL_LIST_SCROLL_CLASS_NAME } from "./composerPickerStyles";
+import type { ComposerPromptTraitKey } from "./composerPromptTraitKey";
 import {
   getComposerTraitSelection,
   planComposerEffortChange,
@@ -144,7 +145,11 @@ type ComposerModelPickerProps = {
   >;
   runtimeAgents?: ReadonlyArray<ProviderAgentDescriptor> | null | undefined;
   modelOptions: ProviderModelOptions[ProviderKind] | undefined;
-  prompt: string;
+  // The composer prompt reduced to what trait resolution reads, so the picker re-renders
+  // when Ultrathink appears or disappears instead of on every keystroke.
+  promptTraitKey: ComposerPromptTraitKey;
+  // Reads the current composer prompt for an effort choice that rewrites it (Ultrathink).
+  getPrompt: () => string;
   onPromptChange: (prompt: string) => void;
 
   open?: boolean;
@@ -275,12 +280,14 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
       ? props.modelOptions
       : (draftSelectionByProvider?.[provider]?.options ??
         stickySelectionByProvider[provider]?.options);
-  const promptFor = (provider: ProviderKind) => (provider === props.provider ? props.prompt : "");
+  // Only the composer's own provider reads its prompt; other providers' rows resolve as empty.
+  const promptTraitKeyFor = (provider: ProviderKind): ComposerPromptTraitKey =>
+    provider === props.provider ? props.promptTraitKey : "";
   const traitSelectionFor = (provider: ProviderKind, model: string) =>
     getComposerTraitSelection(
       provider,
       model,
-      promptFor(provider),
+      promptTraitKeyFor(provider),
       providerOptionsFor(provider),
       resolveRuntimeModelDescriptor({
         provider,
@@ -309,7 +316,7 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
   const currentTraitSelection = getComposerTraitSelection(
     props.provider,
     props.model,
-    props.prompt,
+    props.promptTraitKey,
     props.modelOptions,
     props.runtimeModel,
     t,
@@ -482,7 +489,8 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
     const plan = planComposerEffortChange({
       provider: row.provider,
       selection: traitSelectionFor(row.provider, model),
-      prompt: promptFor(row.provider),
+      // Read when the row is picked: the rewrite keeps the text typed since the last render.
+      prompt: row.provider === props.provider ? props.getPrompt() : "",
       value,
     });
     if (!plan) return;
@@ -665,7 +673,7 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
                     }
                     providerOptions={providerOptionsFor(row.provider)}
                     runtimeModels={props.runtimeModelsByProvider?.[row.provider]}
-                    prompt={promptFor(row.provider)}
+                    promptTraitKey={promptTraitKeyFor(row.provider)}
                     starredModelSlots={starredModelSlots}
                     onSelect={selectRow}
                     // The footer slider owns effort in slider mode; rows stay plain.
@@ -701,7 +709,6 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
             runtimeModel={props.runtimeModel}
             runtimeAgents={props.runtimeAgents}
             modelOptions={props.modelOptions}
-            prompt={props.prompt}
             onPromptChange={props.onPromptChange}
             effortControl={effortControl}
             fastModeNotice={props.provider === "claudeAgent" ? props.fastModeNotice : null}

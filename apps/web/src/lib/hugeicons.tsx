@@ -18,8 +18,8 @@ interface HugeiconPath {
   roundJoin?: boolean;
 }
 
-// Hugeicons draws a 1.5 stroke on a 24 grid, under 1px once shrunk to the 12–14px of
-// meta rows and menus; callers rendering one that small pass a heavier `strokeWidth`.
+// Hugeicons ships a 1.5 stroke on a 24 grid. The app draws 1.75, the same weight the Central
+// outline icons are served at (see CENTRAL_ICON_STROKE_WIDTH), so the two families match.
 // `mirror` flips the drawing left to right, then `rotate` turns it clockwise by that many degrees;
 // both pivot on the center of the grid.
 function createHugeicon(
@@ -52,7 +52,7 @@ function createHugeicon(
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        strokeWidth={options.strokeWidth ?? 1.5}
+        strokeWidth={options.strokeWidth ?? 1.75}
         role={labelled ? "img" : undefined}
         aria-hidden={labelled ? undefined : true}
         data-slot="hugeicon"

@@ -100,6 +100,11 @@ export const AppsIcon: LucideIcon = (props) => (
 );
 // Composer stacked-panel glyphs (subagent strip / workflow run card).
 export const BackgroundTrayIcon: LucideIcon = centralIconWrapper("arrow-down-wall");
+export const BannerImageIcon: LucideIcon = centralIconWrapper("images-1");
+// Two rows of a large ring and a short line, as Codex marks its floating summary card. Drawn
+// for Arbor (public/central-icons-reversed/arbor-panel-rows.svg): the set's own bullet-list
+// has small rings and long lines, which reads as a text list at header size.
+export const EnvironmentPanelIcon: LucideIcon = centralIconWrapper("arbor-panel-rows");
 export const ContextCompactionIcon: LucideIcon = centralIconWrapper("arrows-hide");
 export const BackToParentIcon: LucideIcon = centralIconWrapper("arrow-share-left");
 export const WorkflowIcon: LucideIcon = centralIconWrapper("agents");

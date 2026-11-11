@@ -184,6 +184,27 @@ export function retainLiveBackendAfterShutdownFailure<T extends BackendShutdownP
   return current === null && !hasExited(attempted) ? attempted : current;
 }
 
+/**
+ * Closes the desktop's end of the backend's IPC channel before shutdown.
+ *
+ * The backend's update bridge listens on that channel, which keeps the channel
+ * referenced in the backend: once the shutdown request has closed its database
+ * and stopped its providers, the open channel alone keeps its event loop alive
+ * until the TERM escalation. Nothing needs the channel by then, because the
+ * update control refuses every request once the desktop is quitting.
+ */
+export function releaseBackendIpcChannel(
+  child: Pick<ChildProcess, "connected" | "disconnect">,
+): void {
+  if (!child.connected) return;
+  try {
+    child.disconnect();
+  } catch {
+    // An already-closing channel cannot hold the backend; the TERM escalation
+    // still bounds shutdown.
+  }
+}
+
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
     timer.unref();

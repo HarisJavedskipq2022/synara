@@ -43,6 +43,7 @@ export * from "./githubProjectProvisioning";
 export * from "./pullRequests";
 export * from "./pullRequestAutoFix";
 export * from "./githubInbox";
+export * from "./jira";
 export * from "./orchestration";
 export * from "./asyncUserInput";
 export * from "./editor";

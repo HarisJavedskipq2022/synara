@@ -225,6 +225,23 @@ const HOT_PATH_MODULES: readonly HotPathModule[] = [
   { relativePath: "chat/ComposerMenuPanel.tsx", allowedBailoutReasons: [] },
   { relativePath: "chat/TraitsPicker.tsx", allowedBailoutReasons: [] },
   { relativePath: "chat/ProjectPicker.tsx", allowedBailoutReasons: [] },
+  // The model picker sits in the composer footer and skips keystrokes only while its
+  // element stays memoized (it takes a prompt trait key, not the prompt text).
+  {
+    relativePath: "chat/ComposerModelPicker.tsx",
+    requiredFunction: "ComposerModelPicker",
+    allowedBailoutReasons: [],
+  },
+  {
+    relativePath: "chat/ComposerModelPickerRow.tsx",
+    requiredFunction: "ComposerModelPickerRow",
+    allowedBailoutReasons: [],
+  },
+  {
+    relativePath: "chat/ComposerModelPickerTraitRows.tsx",
+    requiredFunction: "ComposerModelPickerTraitRows",
+    allowedBailoutReasons: [],
+  },
   // Not chat-specific, but rendered inside every message row and sidebar row.
   { relativePath: "ui/button.tsx", allowedBailoutReasons: [] },
   // One per running thread in the sidebar; its ref + layout-effect timeline sync must

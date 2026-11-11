@@ -17,6 +17,7 @@ import {
   serverRecapQueryOptions,
   sidebarLocalServersQueryOptions,
 } from "./serverReactQuery";
+import { providerDiscoveryQueryKeys } from "./providerDiscoveryReactQuery";
 
 const nativeApiMocks = vi.hoisted(() => ({
   getConfig: vi.fn<() => Promise<ServerConfig>>(),
@@ -54,6 +55,93 @@ function makeServerConfig(providers: readonly ServerProviderStatus[]): ServerCon
     availableEditors: [],
   };
 }
+
+function isInvalidated(queryClient: QueryClient, key: readonly unknown[]) {
+  return queryClient.getQueryState(key)?.isInvalidated === true;
+}
+
+describe("model refetch after a sign-in outside the app", () => {
+  const cursorStatus = (
+    authStatus: ServerProviderStatus["authStatus"],
+    checkedAt: string,
+    instanceId = "cursor",
+  ) =>
+    ({
+      provider: "cursor",
+      instanceId,
+      driver: "cursor",
+      status: authStatus === "authenticated" ? "ready" : "error",
+      available: true,
+      authStatus,
+      checkedAt,
+    }) satisfies ServerProviderStatus;
+  const modelsKey = (provider: "cursor" | "codex", instanceId: string | null = null) =>
+    providerDiscoveryQueryKeys.models(
+      provider,
+      null,
+      null,
+      null,
+      "/repo",
+      null,
+      null,
+      null,
+      instanceId as never,
+    );
+  const seed = (queryClient: QueryClient, providers: readonly ServerProviderStatus[]) => {
+    queryClient.setQueryData(serverQueryKeys.config(), makeServerConfig(providers));
+    for (const key of [
+      modelsKey("cursor"),
+      modelsKey("cursor", "cursor_work"),
+      modelsKey("codex"),
+    ]) {
+      queryClient.setQueryData(key, { models: [] });
+    }
+  };
+  it("refetches a gated provider's models once when it turns signed in", async () => {
+    const queryClient = new QueryClient();
+    seed(queryClient, [
+      READY_CODEX_STATUS,
+      cursorStatus("unauthenticated", "2026-07-26T16:00:00.000Z"),
+      cursorStatus("unauthenticated", "2026-07-26T16:00:00.000Z", "cursor_work"),
+    ]);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await reconcileServerProviderStatuses(queryClient, [
+      READY_CODEX_STATUS,
+      cursorStatus("authenticated", "2026-07-26T16:01:00.000Z"),
+      cursorStatus("unauthenticated", "2026-07-26T16:01:00.000Z", "cursor_work"),
+    ]);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(isInvalidated(queryClient, modelsKey("cursor"))).toBe(true);
+    // Another Cursor account that is still signed out, and another provider, are untouched.
+    expect(isInvalidated(queryClient, modelsKey("cursor", "cursor_work"))).toBe(false);
+    expect(isInvalidated(queryClient, modelsKey("codex"))).toBe(false);
+
+    // Later pushes of the same signed-in status do not refetch again.
+    await reconcileServerProviderStatuses(queryClient, [
+      READY_CODEX_STATUS,
+      cursorStatus("authenticated", "2026-07-26T16:02:00.000Z"),
+      cursorStatus("unauthenticated", "2026-07-26T16:02:00.000Z", "cursor_work"),
+    ]);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves providers whose model listing is not gated on sign-in alone", async () => {
+    const queryClient = new QueryClient();
+    seed(queryClient, [
+      { ...READY_CODEX_STATUS, status: "error", authStatus: "unauthenticated" },
+      cursorStatus("authenticated", "2026-07-26T16:00:00.000Z"),
+    ]);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await reconcileServerProviderStatuses(queryClient, [
+      { ...READY_CODEX_STATUS, checkedAt: "2026-07-26T16:45:00.000Z" },
+      cursorStatus("authenticated", "2026-07-26T16:01:00.000Z"),
+    ]);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(isInvalidated(queryClient, modelsKey("codex"))).toBe(false);
+  });
+});
 
 describe("server provider status reconciliation", () => {
   it("keeps a newer config cache write during native initial hydration", async () => {

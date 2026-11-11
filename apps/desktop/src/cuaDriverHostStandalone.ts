@@ -78,7 +78,7 @@ async function main(): Promise<void> {
   const endpoint = option("--socket");
   if (endpoint) await clearStaleCuaHostSocket(endpoint);
 
-  sweepOrphanedCuaDrivers();
+  await sweepOrphanedCuaDrivers();
   const host = new CuaDriverHost({
     binaryPath,
     // TCC's bundle identity has no meaning off macOS; the string still labels

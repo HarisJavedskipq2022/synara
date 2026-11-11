@@ -1,7 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { loadRehypeKatex } from "../lib/lazyRehypeKatex";
+
+// These cases cover math once KaTeX has loaded, as it is after the first math
+// message of a session; lazyRehypeKatex.test.tsx covers the loading moment.
+beforeAll(async () => {
+  await loadRehypeKatex();
+}, 30_000);
 
 vi.mock("@pierre/diffs", () => ({
   getFiletypeFromFileName: (fileName: string) => (fileName.endsWith(".ts") ? "ts" : "text"),

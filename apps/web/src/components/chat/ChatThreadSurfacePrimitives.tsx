@@ -55,7 +55,9 @@ export function LazyDiffPanel(props: {
   onEditFile?: (request: DiffFileEditRequest) => void;
 }) {
   return (
-    <DiffWorkerPoolProvider>
+    // Workers start when the first diff renders, or when idle while the panel is
+    // live on screen; a hidden or never-opened diff panel starts none.
+    <DiffWorkerPoolProvider warmWhenIdle={props.liveRefreshEnabled ?? true}>
       <Suspense
         fallback={
           <DiffLoadingFallback

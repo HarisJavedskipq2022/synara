@@ -657,6 +657,17 @@ export const ServerConfigStreamEvent = Schema.Union([
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
 
+/**
+ * `force: false` marks an automatic refresh (window focus, visibility, timers):
+ * the server may reuse recent healthy probes and cached CLI version output.
+ * A missing `force` means an explicit refresh and re-probes every provider, so
+ * older clients that omit it keep today's behaviour for refresh buttons.
+ */
+export const ServerRefreshProvidersInput = Schema.Struct({
+  force: Schema.optional(Schema.Boolean),
+});
+export type ServerRefreshProvidersInput = typeof ServerRefreshProvidersInput.Type;
+
 export const ServerRefreshProvidersResult = ServerProviderStatusesUpdatedPayload;
 export type ServerRefreshProvidersResult = typeof ServerRefreshProvidersResult.Type;
 

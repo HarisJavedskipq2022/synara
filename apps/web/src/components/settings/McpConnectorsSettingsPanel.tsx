@@ -26,6 +26,7 @@ import {
 
 import { ComposerPickerMenuPopup } from "~/components/chat/ComposerPickerMenuPopup";
 import { Button } from "~/components/ui/button";
+import { JiraConnectionSettings } from "./JiraConnectionSettings";
 import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
 import { DisclosureRegion } from "~/components/ui/DisclosureRegion";
 import {
@@ -483,6 +484,8 @@ export function McpConnectorsSettingsPanel(props: { active: boolean }) {
           Add local server
         </Button>
       </div>
+
+      <JiraConnectionSettings active={props.active} />
 
       {connectorsQuery.isError ? (
         <SettingsEmptyState layout="status" tone="destructive">

@@ -57,7 +57,8 @@ it.each(["standalone", "composer"] as const)(
           loadingModelProviders={catalog.loadingModelProviders}
           onProviderModelChange={onProviderModelChange}
           modelOptions={undefined}
-          prompt=""
+          promptTraitKey=""
+          getPrompt={() => ""}
           onPromptChange={() => undefined}
         />
       ) : (

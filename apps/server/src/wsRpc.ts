@@ -287,6 +287,7 @@ import {
   GitHubInboxRateLimitedError,
   GitHubInboxService,
 } from "./githubInbox/Services/GitHubInboxService";
+import { JiraError, JiraService } from "./jira/Services/JiraService";
 import { resolveGitHubRepository } from "./pullRequests/repositoryResolution";
 import {
   GitHubProjectProvisioningError,
@@ -554,6 +555,12 @@ const makeWsRpcHandlersLayer = () =>
       const pullRequests = yield* PullRequestService;
       const pullRequestAutoFix = yield* PullRequestAutoFixService;
       const githubInbox = yield* GitHubInboxService;
+      const jira = yield* JiraService;
+      // Jira failures are fixed text chosen by the service; keep their code and drop the cause.
+      const jiraEffect = <A, R>(effect: Effect.Effect<A, JiraError, R>) =>
+        effect.pipe(
+          Effect.mapError((cause) => new WsRpcError({ message: cause.message, code: cause.code })),
+        );
       const profileStatsQuery = yield* ProfileStatsQuery;
       const recapStatsQuery = yield* RecapStatsQuery;
       const threadSearchQuery = yield* ThreadSearchQuery;
@@ -2368,6 +2375,11 @@ const makeWsRpcHandlersLayer = () =>
           pullRequestsEffect(githubInbox.issueDetail(input), "Failed to load issue"),
         [WS_METHODS.githubInboxIssueComment]: (input) =>
           pullRequestsEffect(githubInbox.issueComment(input), "Could not post the comment"),
+        [WS_METHODS.jiraStatus]: () => jira.status(),
+        [WS_METHODS.jiraConnect]: (input) => jiraEffect(jira.connect(input)),
+        [WS_METHODS.jiraDisconnect]: () => jiraEffect(jira.disconnect()),
+        [WS_METHODS.jiraIssues]: (input) => jiraEffect(jira.issues(input)),
+        [WS_METHODS.jiraIssue]: (input) => jiraEffect(jira.issue(input)),
         [WS_METHODS.pullRequestsDetail]: (input) =>
           pullRequestsEffect(pullRequests.detail(input), "Failed to load pull request"),
         [WS_METHODS.pullRequestsDiff]: (input) =>
@@ -2636,9 +2648,15 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(serverSettings.getSettingsView, "Failed to load server settings"),
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
-        [WS_METHODS.serverRefreshProviders]: () =>
+        // A missing `force` is an explicit refresh (older clients, refresh
+        // buttons); only `force: false` from focus/visibility refreshes may
+        // reuse recent healthy probes.
+        [WS_METHODS.serverRefreshProviders]: (input) =>
           rpcEffect(
-            providerHealth.refresh.pipe(Effect.map((providers) => ({ providers }))),
+            (input?.force === false
+              ? (providerHealth.refreshAutomatic ?? providerHealth.refresh)
+              : providerHealth.refresh
+            ).pipe(Effect.map((providers) => ({ providers }))),
             "Failed to refresh providers",
           ),
         [WS_METHODS.serverUpdateProvider]: (input) => providerHealth.updateProvider(input),

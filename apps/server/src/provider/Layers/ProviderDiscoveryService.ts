@@ -23,7 +23,7 @@ import { Effect, Exit, Layer, Option, Queue, Schema, SchemaIssue } from "effect"
 
 import { ServerConfig } from "../../config.ts";
 import { gateBetaOnlyProviders, ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderValidationError } from "../Errors.ts";
+import { ProviderAdapterRequestError, ProviderValidationError } from "../Errors.ts";
 import type { ProviderDiscoveryError } from "../Services/ProviderDiscoveryService.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderHealth } from "../Services/ProviderHealth.ts";
@@ -115,6 +115,14 @@ const PROVIDER_DISCOVERY_OPTION_KEYS = {
   pi: ["binaryPath", "agentDir", "environment"],
   omp: ["binaryPath", "agentDir", "environment"],
 } as const satisfies Record<ProviderKind, readonly string[]>;
+
+// Providers whose model discovery signs in on demand when the account is signed
+// out. Cursor's ACP discovery answers `session/new` with auth-required and then
+// runs `cursor_login`, which opens a browser sign-in page even with NO_BROWSER.
+// Background and picker-driven listings must never do that, so discovery waits
+// until the last health probe stops reporting the account as signed out. Signing
+// in stays an explicit action (the provider sign-in dialog runs the CLI login).
+const SIGNED_OUT_DISCOVERY_BLOCKED_PROVIDERS: ReadonlySet<ProviderKind> = new Set(["cursor"]);
 
 const make = Effect.gen(function* () {
   const registry = yield* ProviderAdapterRegistry;
@@ -455,6 +463,33 @@ const make = Effect.gen(function* () {
         };
       }
       const listModelsFromAdapter = adapter.listModels;
+      // Checked before the shared catalog cache, so the refusal is never stored
+      // and replayed: the first listing after the status flips to signed in runs
+      // discovery (or serves a catalog cached from an earlier signed-in session).
+      // While signed out the client keeps whatever catalog it already holds.
+      const requireNotSignedOut = SIGNED_OUT_DISCOVERY_BLOCKED_PROVIDERS.has(resolved.provider)
+        ? providerHealth.getStatuses.pipe(
+            Effect.flatMap((statuses) => {
+              const status = statuses.find(
+                (entry) =>
+                  (entry.driver ?? entry.provider) === resolved.provider &&
+                  (entry.instanceId ?? entry.provider) === resolved.instanceId,
+              );
+              return status?.authStatus === "unauthenticated"
+                ? Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: resolved.provider,
+                      method: "model/list",
+                      detail:
+                        status.message ??
+                        "Not signed in. Sign in to this provider to load its models.",
+                    }),
+                  )
+                : Effect.void;
+            }),
+          )
+        : Effect.void;
+      yield* requireNotSignedOut;
       const discover = Effect.suspend(() => listModelsFromAdapter(resolved)).pipe(
         Effect.flatMap((result) =>
           isolateMalformedModelDescriptors({ provider: resolved.provider, result }),

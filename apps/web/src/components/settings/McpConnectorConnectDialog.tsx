@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 
 import { AppIconTile, ConnectorDots } from "~/components/AppIconTile";
 import { ConnectorIcon } from "~/components/ConnectorIcon";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { Button } from "~/components/ui/button";
 import { CopyTextButton } from "~/components/ui/copyTextButton";
 import {
@@ -207,7 +207,7 @@ export function McpConnectorConnectDialog(props: {
                 glowColor={NEUTRAL_GLOW}
                 className="bg-black text-white"
               >
-                <SynaraLogo className="size-8 text-white" />
+                <ArborLogo className="size-8 text-white" />
               </AppIconTile>
               <ConnectorDots
                 size="xl"

@@ -3,7 +3,7 @@
 // Layer: Web appearance domain tests
 // Exports: Vitest coverage for theme.logic.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_THEME_STATE,
   buildResolvedThemeTokens,
@@ -21,6 +21,7 @@ import {
   resetThemeVariant,
   setThemeCodeThemeId,
   setWindowTranslucency,
+  themeUsesGoogleFonts,
   updateThemePackFromShareString,
 } from "./theme.logic";
 
@@ -408,6 +409,24 @@ describe("buildThemeCssVariables", () => {
 describe("window translucency", () => {
   const macDesktop = { windowTranslucency: "native" as const };
 
+  // The default theme asks for an opaque window; these cover a theme that opted into glass.
+  const glassPack = (variant: "dark" | "light") => {
+    const pack = resolveThemePack(DEFAULT_THEME_STATE, variant);
+    return { ...pack, theme: { ...pack.theme, opaqueWindows: false } };
+  };
+
+  it("keeps the default theme opaque on a desktop that could back glass", () => {
+    for (const variant of ["dark", "light"] as const) {
+      const built = buildThemeCssVariables(
+        resolveThemePack(DEFAULT_THEME_STATE, variant),
+        variant,
+        macDesktop,
+      );
+      expect(built.material).toBe("opaque");
+      expect(built.translucencyScope).toBe("none");
+    }
+  });
+
   const sidebarOnly = (opacity: number) => ({
     ...macDesktop,
     translucency: { opacity, blur: 0, sidebarOnly: true },
@@ -422,7 +441,7 @@ describe("window translucency", () => {
   });
 
   it("makes the whole window one translucent coat when not limited to the sidebar", () => {
-    const dark = buildThemeCssVariables(resolveThemePack(DEFAULT_THEME_STATE, "dark"), "dark", {
+    const dark = buildThemeCssVariables(glassPack("dark"), "dark", {
       ...macDesktop,
       translucency: { opacity: 72, blur: null, sidebarOnly: false },
     });
@@ -447,7 +466,7 @@ describe("window translucency", () => {
       dark.variables["--app-glass-raised-surface"],
     );
     expect(dark.variables["--app-overlay-backing"]).toBe("");
-    const light = buildThemeCssVariables(resolveThemePack(DEFAULT_THEME_STATE, "light"), "light", {
+    const light = buildThemeCssVariables(glassPack("light"), "light", {
       ...macDesktop,
       translucency: { opacity: 38, blur: null, sidebarOnly: false },
     });
@@ -457,7 +476,7 @@ describe("window translucency", () => {
   });
 
   it("keeps the content opaque and the shell clear for opaque windows", () => {
-    const opaque = buildThemeCssVariables(resolveThemePack(DEFAULT_THEME_STATE, "dark"), "dark", {
+    const opaque = buildThemeCssVariables(glassPack("dark"), "dark", {
       windowTranslucency: null,
     });
     expect(opaque.material).toBe("opaque");
@@ -471,7 +490,7 @@ describe("window translucency", () => {
   });
 
   it("projects the same glass on a compositor-blurred window as on macOS vibrancy", () => {
-    const pack = resolveThemePack(DEFAULT_THEME_STATE, "dark");
+    const pack = glassPack("dark");
     const translucency = { opacity: 72, blur: null, sidebarOnly: false };
     const compositor = buildThemeCssVariables(pack, "dark", {
       windowTranslucency: "compositor",
@@ -491,16 +510,8 @@ describe("window translucency", () => {
   });
 
   it("keeps the long-standing sidebar fills when limited to the sidebar", () => {
-    const dark = buildThemeCssVariables(
-      resolveThemePack(DEFAULT_THEME_STATE, "dark"),
-      "dark",
-      sidebarOnly(72),
-    );
-    const light = buildThemeCssVariables(
-      resolveThemePack(DEFAULT_THEME_STATE, "light"),
-      "light",
-      sidebarOnly(38),
-    );
+    const dark = buildThemeCssVariables(glassPack("dark"), "dark", sidebarOnly(72));
+    const light = buildThemeCssVariables(glassPack("light"), "light", sidebarOnly(38));
     expect(dark.material).toBe("translucent");
     expect(dark.translucencyScope).toBe("sidebar");
     expect(dark.variables["--app-window-background"]).toBe("transparent");
@@ -523,7 +534,7 @@ describe("window translucency", () => {
   });
 
   it("scales the sidebar and rail fills with the chosen opacity", () => {
-    const pack = resolveThemePack(DEFAULT_THEME_STATE, "light");
+    const pack = glassPack("light");
     const clear = buildThemeCssVariables(pack, "light", sidebarOnly(0));
     const dense = buildThemeCssVariables(pack, "light", sidebarOnly(90));
     expect(clear.variables["--app-sidebar-surface"]).toMatch(/ 0%, transparent\)$/);
@@ -582,5 +593,67 @@ describe("resolveProfileThemeAccent", () => {
         }),
       ),
     ).toEqual({ light: "#339cff", dark: "#339cff" });
+  });
+});
+
+describe("themeUsesGoogleFonts", () => {
+  const seed = (codeThemeId: string) => ({
+    codeThemeId,
+    theme: getCodeThemeSeed(codeThemeId, "light"),
+  });
+  const withFonts = (fonts: { ui: string | null; code: string | null }) => ({
+    codeThemeId: "custom-light",
+    theme: { ...DEFAULT_THEME_STATE.chromeThemes.light, fonts },
+  });
+
+  it("leaves the default theme on the system fonts", () => {
+    expect(themeUsesGoogleFonts(seed("synara"), { systemUiFont: true })).toBe(false);
+    expect(themeUsesGoogleFonts(seed("synara"), { systemUiFont: false })).toBe(false);
+  });
+
+  it("loads for a code font even while the system UI font is on", () => {
+    // Vercel's code font is "Geist Mono", which applies regardless of the UI font switch.
+    expect(themeUsesGoogleFonts(seed("vercel"), { systemUiFont: true })).toBe(true);
+  });
+
+  it("loads for a UI font only once the system UI font is off", () => {
+    expect(themeUsesGoogleFonts(seed("linear"), { systemUiFont: true })).toBe(false);
+    expect(themeUsesGoogleFonts(seed("linear"), { systemUiFont: false })).toBe(true);
+    expect(themeUsesGoogleFonts(seed("linear"))).toBe(true);
+  });
+
+  it("reads typed font lists by family name", () => {
+    const ui = (value: string) =>
+      themeUsesGoogleFonts(withFonts({ ui: value, code: null }), { systemUiFont: false });
+    expect(ui("'Inter', sans-serif")).toBe(true);
+    expect(ui(' "geist" ')).toBe(true);
+    expect(ui("Helvetica, DM Sans")).toBe(true);
+    expect(ui("Interstate, Geistlich")).toBe(false);
+    expect(themeUsesGoogleFonts(withFonts({ ui: null, code: '"Geist Mono", monospace' }))).toBe(
+      true,
+    );
+    expect(themeUsesGoogleFonts(withFonts({ ui: null, code: "Menlo" }))).toBe(false);
+  });
+
+  it("is only a decision: building a web-font theme's variables leaves the document alone", () => {
+    // Loading is useTheme.ts's job when it applies a theme (see useTheme.test.ts).
+    const touched: string[] = [];
+    const recorder = new Proxy(
+      {},
+      {
+        get: (_target, key) => {
+          touched.push(String(key));
+          return undefined;
+        },
+      },
+    );
+    vi.stubGlobal("document", recorder);
+    try {
+      buildThemeCssVariables(seed("vercel"), "light", { systemUiFont: false });
+      buildThemeCssVariables(seed("linear"), "light", { systemUiFont: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(touched).toEqual([]);
   });
 });

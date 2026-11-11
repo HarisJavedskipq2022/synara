@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { CENTRAL_ICON_DIRECTORIES, pruneProductionIcons } from "./production-assets";
+import {
+  applyCentralIconStrokeWidth,
+  applyProductionIconStrokeWidth,
+  CENTRAL_ICON_DIRECTORIES,
+  CENTRAL_ICON_STROKE_WIDTH,
+  CENTRAL_OUTLINE_ICON_DIRECTORY,
+  pruneProductionIcons,
+} from "./production-assets";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -62,6 +69,33 @@ describe("production icon pruning", () => {
     await pruneProductionIcons(f.publicDir, f.dist, [f.source]);
     for (const dir of CENTRAL_ICON_DIRECTORIES) {
       expect(await fs.readdir(path.join(f.dist, dir))).toHaveLength(4);
+    }
+  });
+});
+
+describe("outline icon stroke weight", () => {
+  it("re-weights the shipped 1.5 strokes and leaves a glyph's other weights alone", () => {
+    const svg =
+      '<svg><path stroke-width="1.5"/><path stroke-width="0.5"/><path stroke-width="1.59375"/></svg>';
+    expect(applyCentralIconStrokeWidth(svg)).toBe(
+      `<svg><path stroke-width="${CENTRAL_ICON_STROKE_WIDTH}"/><path stroke-width="0.5"/><path stroke-width="1.59375"/></svg>`,
+    );
+  });
+
+  it("rewrites only the built outline icons", async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), "arbor-icon-stroke-"));
+    roots.push(root);
+    const shipped = '<svg><path stroke-width="1.5"/></svg>';
+    for (const directory of CENTRAL_ICON_DIRECTORIES) {
+      await fs.mkdir(path.join(root, directory), { recursive: true });
+      await fs.writeFile(path.join(root, directory, "star.svg"), shipped);
+    }
+    await applyProductionIconStrokeWidth(root);
+    for (const directory of CENTRAL_ICON_DIRECTORIES) {
+      const built = await fs.readFile(path.join(root, directory, "star.svg"), "utf8");
+      expect(built.includes(`stroke-width="${CENTRAL_ICON_STROKE_WIDTH}"`)).toBe(
+        directory === CENTRAL_OUTLINE_ICON_DIRECTORY,
+      );
     }
   });
 });

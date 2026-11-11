@@ -22,6 +22,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { SYNARA_BETA_BUNDLE_ID, SYNARA_PRODUCTION_BUNDLE_ID } from "@synara/shared/desktopIdentity";
+
 import {
   httpsFetchText,
   installBetaFromFeed,
@@ -158,7 +160,7 @@ describe("resolveBetaFeedLocation", () => {
   });
 });
 
-function fakeApp(dir: string, bundleId = "com.emanueledipietro.synara.beta"): string {
+function fakeApp(dir: string, bundleId = SYNARA_BETA_BUNDLE_ID): string {
   const appPath = join(dir, "Synara Beta.app", "Contents");
   mkdirSync(appPath, { recursive: true });
   writeFileSync(
@@ -178,7 +180,7 @@ describe("verifyBetaAppBundle", () => {
 
   it("rejects a non-beta bundle id", () => {
     const root = makeRoot();
-    expect(() => verifyBetaAppBundle(fakeApp(root, "com.emanueledipietro.synara"))).toThrow(
+    expect(() => verifyBetaAppBundle(fakeApp(root, SYNARA_PRODUCTION_BUNDLE_ID))).toThrow(
       /not Synara Beta/,
     );
   });
@@ -253,7 +255,7 @@ describe("installBetaFromFeed", () => {
       ...deps,
       run: (command: string, args: readonly string[]) => {
         if (command === "ditto") {
-          fakeApp(args[args.length - 1]!, "com.emanueledipietro.synara");
+          fakeApp(args[args.length - 1]!, SYNARA_PRODUCTION_BUNDLE_ID);
           return;
         }
         if (command === "mv") return;

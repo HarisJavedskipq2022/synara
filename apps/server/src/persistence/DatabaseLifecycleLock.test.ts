@@ -25,7 +25,9 @@ vi.mock("node:fs/promises", async () => {
 const tempDirectories: Array<string> = [];
 
 async function makeDbPath(): Promise<string> {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "synara-db-lock-"));
+  // The lock canonicalizes its directory, and macOS's tmpdir is a symlink (/var -> /private/var).
+  // Tests that compare paths with the lock's own must use the same canonical form.
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "synara-db-lock-")));
   tempDirectories.push(directory);
   return path.join(directory, "state.sqlite");
 }

@@ -77,6 +77,7 @@ import { PullRequestServiceLive } from "./pullRequests/Layers/PullRequestService
 import { PullRequestAutoFixRepositoryLive } from "./persistence/Layers/PullRequestAutoFixRepository";
 import { PullRequestAutoFixServiceLive } from "./pullRequestAutoFix/Layers/PullRequestAutoFixService";
 import { GitHubInboxServiceLive } from "./githubInbox/Layers/GitHubInboxService";
+import { JiraServiceLive } from "./jira/Layers/JiraService";
 import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
 import { makeServerProviderLayer } from "./provider/runtimeLayer";
 import { RemoteSessionRegistryLive } from "./remoteSessions/sessionRegistry";
@@ -306,6 +307,8 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(OrchestrationLayerLive),
     Layer.provideMerge(ServerSettingsLive),
   );
+  // The Jira connection is one entry in this app's secret store.
+  const jiraServiceLayer = JiraServiceLive.pipe(Layer.provideMerge(ServerSecretStoreLive));
   const pullRequestServiceLayer = PullRequestServiceLive.pipe(
     Layer.provideMerge(githubInboxServiceLayer),
   );
@@ -340,6 +343,7 @@ export function makeServerRuntimeServicesLayer(
     providerHealthLayer,
     ProjectPullRequestPinsLive,
     pullRequestServiceLayer,
+    jiraServiceLayer,
     pullRequestAutoFixLayer,
     orchestrationReactorLayer,
     providerCommandReactorLayer,

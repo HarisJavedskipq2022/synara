@@ -3,6 +3,8 @@ import { statSync, watch } from "node:fs";
 import { join } from "node:path";
 import waitOn from "wait-on";
 
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
+
 import { buildAppSnapHelper } from "./build-appsnap-helper.mjs";
 import { buildWindowMaterialAddon } from "./build-window-material-addon.mjs";
 import { configureMacLauncher, desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
@@ -27,6 +29,10 @@ const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
 const staleComputerUseGracePeriodMs = 300;
+// App names come from the identity so a rebrand cannot leave these checks matching nothing.
+const devAppName = synaraDesktopIdentity("development").displayName;
+const stableAppName = synaraDesktopIdentity("production").displayName;
+const stableAppExecutable = `/Applications/${stableAppName}.app/Contents/MacOS/${stableAppName}`;
 
 if (process.platform === "darwin") {
   buildAppSnapHelper({ arch: process.arch });
@@ -89,7 +95,7 @@ function cleanupStaleDevApps() {
 }
 
 function listStaleComputerUsePids() {
-  // Only macOS exposes a verifiable Synara (Dev) executable path for these
+  // Only macOS exposes a verifiable dev-app executable path for these
   // helpers. Linux process command lines do not currently carry a dev-owner
   // marker, so reaping by the generic script name could kill another install.
   if (process.platform !== "darwin") {
@@ -100,7 +106,7 @@ function listStaleComputerUsePids() {
 
   return candidatePids.filter((pid) => {
     const command = readProcessCommand(pid);
-    if (!/Synara \(Dev\)\.app\/Contents\/MacOS\/Electron/.test(command)) {
+    if (!command.includes(`${devAppName}.app/Contents/MacOS/Electron`)) {
       return false;
     }
     if (!/computerUseMcp\.mjs\s+mcp(?:\s|$)/.test(command)) {
@@ -122,7 +128,7 @@ function cleanupStaleComputerUseApps() {
   }
 
   console.error(
-    `[desktop-dev] Cleaning up ${stalePids.length} stale Synara (Dev) Computer Use helper process${stalePids.length === 1 ? "" : "es"} from other worktrees.`,
+    `[desktop-dev] Cleaning up ${stalePids.length} stale ${devAppName} Computer Use helper process${stalePids.length === 1 ? "" : "es"} from other worktrees.`,
   );
 
   for (const pid of stalePids) {
@@ -141,17 +147,17 @@ function warnIfAlphaAppRunning() {
     return;
   }
 
-  const pids = listPidsByExactProcessName("Synara").filter((pid) =>
-    readProcessCommand(pid).startsWith("/Applications/Synara.app/Contents/MacOS/Synara"),
+  const pids = listPidsByExactProcessName(stableAppName).filter((pid) =>
+    readProcessCommand(pid).startsWith(stableAppExecutable),
   );
   if (pids.length === 0) {
     return;
   }
 
   console.error(
-    "[desktop-dev] Synara is still running. Close it before testing voice in Synara (Dev), or you may be looking at the wrong app/runtime.",
+    `[desktop-dev] ${stableAppName} is still running. Close it before testing voice in ${devAppName}, or you may be looking at the wrong app/runtime.`,
   );
-  console.error(`[desktop-dev] Running Synara process IDs: ${pids.join(", ")}`);
+  console.error(`[desktop-dev] Running ${stableAppName} process IDs: ${pids.join(", ")}`);
 }
 
 function startApp() {

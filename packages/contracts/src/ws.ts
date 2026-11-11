@@ -208,6 +208,7 @@ import {
   ServerKeepAwakeUpdatedPayload,
   ServerLifecycleStreamEvent,
   ServerProviderUpdateInput,
+  ServerRefreshProvidersInput,
   ServerUpdateSettingsInput,
   ServerConsumeCodexResetCreditInput,
   ServerGetProviderUsageSnapshotInput,
@@ -246,6 +247,7 @@ import {
   GitHubIssueCommentInput,
   GitHubIssueDetailInput,
 } from "./githubInbox";
+import { JiraConnectInput, JiraIssueInput, JiraIssuesInput } from "./jira";
 import {
   ExternalMcpCreateIntegrationInput,
   ExternalMcpRefreshPairingInput,
@@ -352,6 +354,13 @@ export const WS_METHODS = {
   githubInboxList: "githubInbox.list",
   githubInboxIssueDetail: "githubInbox.issueDetail",
   githubInboxIssueComment: "githubInbox.issueComment",
+
+  // Jira Cloud connection and issues
+  jiraStatus: "jira.status",
+  jiraConnect: "jira.connect",
+  jiraDisconnect: "jira.disconnect",
+  jiraIssues: "jira.issues",
+  jiraIssue: "jira.issue",
   pullRequestsDetail: "pullRequests.detail",
   pullRequestsDiff: "pullRequests.diff",
   pullRequestsAction: "pullRequests.action",
@@ -698,6 +707,13 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.githubInboxIssueDetail, GitHubIssueDetailInput),
   tagRequestBody(WS_METHODS.githubInboxIssueComment, GitHubIssueCommentInput),
 
+  // Jira
+  tagRequestBody(WS_METHODS.jiraStatus, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.jiraConnect, JiraConnectInput),
+  tagRequestBody(WS_METHODS.jiraDisconnect, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.jiraIssues, JiraIssuesInput),
+  tagRequestBody(WS_METHODS.jiraIssue, JiraIssueInput),
+
   // Terminal methods
   tagRequestBody(WS_METHODS.terminalOpen, TerminalOpenInput),
   tagRequestBody(WS_METHODS.terminalWrite, TerminalWriteInput),
@@ -715,7 +731,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverDesktopUpdate, ServerDesktopUpdateInput),
   tagRequestBody(WS_METHODS.serverGetSettings, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
-  tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverRefreshProviders, ServerRefreshProvidersInput),
   tagRequestBody(WS_METHODS.serverUpdateProvider, ServerProviderUpdateInput),
   tagRequestBody(WS_METHODS.serverListExternalMcpIntegrations, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverCreateExternalMcpIntegration, ExternalMcpCreateIntegrationInput),

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SYNARA_DESKTOP_SMOKE_USER_DATA_ENV,
   SYNARA_SOURCE_DESKTOP_BUILD_MARKER,
+  synaraDesktopIdentity,
 } from "@synara/shared/desktopIdentity";
 import { spawnSourceDesktop } from "./source-desktop-launch.mjs";
 
@@ -80,7 +81,10 @@ describe("source desktop launch", () => {
       env: {
         PATH: "/usr/bin",
         SYNARA_DESKTOP_FLAVOR: "development",
-        SYNARA_HOME: join("/Users/tester", ".synara-dev"),
+        SYNARA_HOME: join(
+          "/Users/tester",
+          synaraDesktopIdentity("development").defaultHomeDirectoryName,
+        ),
         SYNARA_SOURCE_DESKTOP_BUILD_MARKER,
       },
       stdio: "inherit",

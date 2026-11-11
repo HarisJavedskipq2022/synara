@@ -330,7 +330,6 @@ import {
   SidebarThreadRowContent,
   type SidebarThreadTerminalStatus,
 } from "./SidebarThreadRowContent";
-import { GroupSettingsDialog } from "./chat/group/GroupSettingsDialog";
 import { SidebarGroupsSurface } from "./SidebarGroupsSurface";
 import {
   activateThreadWhenHydrated,
@@ -345,9 +344,8 @@ import { RelocateProjectDialog } from "./RelocateProjectDialog";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { SnoozeUntilDialog } from "./SnoozeUntilDialog";
 import { SNOOZE_PRESETS } from "../lib/threadSnooze";
-import ReleaseHistoryDialog from "./ReleaseHistoryDialog";
 import { GROUPS_ON, INBOX_ON, isBetaFeatureOn } from "../betaFeatures";
-import { WHATS_NEW_ENTRIES } from "../whatsNew/entries";
+import { LATEST_WHATS_NEW_ENTRIES } from "../whatsNew/latestEntries";
 import { sortEntriesByVersionDesc } from "../whatsNew/logic";
 import { SidebarSearchPalette, type SidebarSearchPaletteMode } from "./SidebarSearchPalette";
 import { useHandleNewChat } from "../hooks/useHandleNewChat";
@@ -575,6 +573,7 @@ import {
 } from "../lib/spaceGrouping";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
 import { t, useTranslation } from "~/i18n";
+import { APP_BASE_NAME } from "~/branding";
 
 // Central glyphs for the sidebar section-header buttons (expand/collapse, sort, add).
 const ExpandAllIcon = createCentralIconComponent("expand-45");
@@ -623,6 +622,13 @@ const DebugFeatureFlagsMenu = import.meta.env.DEV
       })),
     )
   : null;
+// The group settings dialog reaches the markdown stack (KaTeX, parse5) through its
+// memory section, so it stays out of the launch graph and loads on first open.
+const GroupSettingsDialog = lazy(() =>
+  import("./chat/group/GroupSettingsDialog").then((module) => ({
+    default: module.GroupSettingsDialog,
+  })),
+);
 
 type ProjectContextMenuId =
   | "open-in-finder"
@@ -973,27 +979,27 @@ function ProjectSortMenu({
 const SYNARA_DOCS_URL = "https://trysynara.com/docs";
 
 // Latest curated releases surfaced directly in the help menu. Static data, so
-// computed once at module scope rather than per render.
-const HELP_MENU_RELEASE_ENTRIES = sortEntriesByVersionDesc(WHATS_NEW_ENTRIES).slice(0, 3);
+// computed once at module scope rather than per render. The latest entries are
+// the head of the full history (`latestEntries.test.ts`).
+const HELP_MENU_RELEASE_ENTRIES = sortEntriesByVersionDesc(LATEST_WHATS_NEW_ENTRIES).slice(0, 3);
 
-// Footer help menu; swapped out for the desktop-update pill while an update is
-// available (see SidebarFooter).
-function SidebarHelpMenu({
+// The release history dialog carries the full changelog, so it loads on first open.
+const ReleaseHistoryDialog = lazy(() => import("./ReleaseHistoryDialog"));
+
+// The rail's bottom corner: the account button, whose menu also carries Help as a submenu
+// so the corner stays at usage plus one picture.
+function RailAccountMenu({
   onOpenShortcuts,
   onOpenFeedback,
   onCustomizeSidebar,
-  inRail: inRailProp,
 }: {
   onOpenShortcuts: () => void;
   onOpenFeedback: () => void;
   /** Null hides the entry (e.g. on surfaces without the primary nav block). */
   onCustomizeSidebar: (() => void) | null;
-  /** Rail layout: the trigger takes the rail button look and the menu opens to the side. */
-  inRail?: boolean;
 }) {
   const { t } = useTranslation();
 
-  const inRail = inRailProp ?? false;
   // `openCount` keys the dialog so each open remounts the accordion — its rows
   // capture `defaultOpen` in mount state, so a stale mount would ignore a
   // newly selected version.
@@ -1009,88 +1015,89 @@ function SidebarHelpMenu({
 
   return (
     <>
-      <Menu>
-        <SidebarIconButton
-          render={<MenuTrigger />}
-          icon={CircleQuestionIcon}
-          label={t("workspace:help")}
-          tooltip={t("workspace:help")}
-          {...(inRail
-            ? {
-                tooltipSide: "right" as const,
-                iconClassName: APP_RAIL_GLYPH_CLASS_NAME,
-                className: appRailButtonClassName(false),
-              }
-            : {})}
-        />
-        <ComposerPickerMenuPopup
-          align="end"
-          side={inRail ? "right" : "top"}
-          className="w-64 min-w-64"
-        >
-          <MenuGroup>
-            <div className="px-2 py-1 sm:text-ui leading-snug font-medium text-muted-foreground">
-              {t("workspace:whatSNew")}
-            </div>
-            {HELP_MENU_RELEASE_ENTRIES.map((entry) => (
-              <MenuItem
-                key={entry.version}
-                className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
-                onClick={() => openReleaseHistory(entry.version)}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {entry.features[0]?.title ?? t("workspace:version", { value0: entry.version })}
-                </span>
-                <span className="shrink-0 text-[var(--color-text-foreground-secondary)] tabular-nums">
-                  {entry.date}
-                </span>
-              </MenuItem>
-            ))}
-            <MenuItem
-              className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
-              onClick={() => openReleaseHistory(null)}
-            >
-              <SidebarContextMenuIcon icon={GiftIcon} />
-              <span>{t("workspace:fullChangelog")}</span>
-            </MenuItem>
-          </MenuGroup>
-          <MenuSeparator />
-          <MenuGroup>
-            {onCustomizeSidebar ? (
-              <MenuItem
-                className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
-                onClick={onCustomizeSidebar}
-              >
-                <SidebarContextMenuIcon icon={CustomizeIcon} />
-                <span>{t("workspace:customizeSidebar")}</span>
-              </MenuItem>
-            ) : null}
-            <MenuItem className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME} onClick={onOpenShortcuts}>
-              <SidebarContextMenuIcon icon={KeyboardIcon} />
-              <span>{t("common:advanced_keybindings")}</span>
-            </MenuItem>
-            <MenuItem className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME} onClick={onOpenFeedback}>
-              <SidebarContextMenuIcon icon={FeedbackIcon} />
-              <span>{t("workspace:sendFeedback")}</span>
-            </MenuItem>
-            <MenuItem
-              className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
-              onClick={() => openExternalLink(SYNARA_DOCS_URL)}
-            >
-              <SidebarContextMenuIcon icon={BookIcon} />
-              <span>{t("workspace:docs")}</span>
-            </MenuItem>
-          </MenuGroup>
-        </ComposerPickerMenuPopup>
-      </Menu>
-      <ReleaseHistoryDialog
-        key={releaseHistory.openCount}
-        open={releaseHistory.open}
-        onOpenChange={(open) => {
-          setReleaseHistory((prev) => ({ ...prev, open }));
-        }}
-        defaultExpandedVersion={releaseHistory.version}
+      <AccountFooterControl
+        menuExtras={
+          <MenuSub>
+            <MenuSubTrigger className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}>
+              <SidebarContextMenuIcon icon={CircleQuestionIcon} />
+              <span>{t("workspace:help")}</span>
+            </MenuSubTrigger>
+            <ComposerPickerMenuSubPopup className="w-64 min-w-64">
+              <MenuGroup>
+                <div className="px-2 py-1 sm:text-ui leading-snug font-medium text-muted-foreground">
+                  {t("workspace:whatSNew")}
+                </div>
+                {HELP_MENU_RELEASE_ENTRIES.map((entry) => (
+                  <MenuItem
+                    key={entry.version}
+                    className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+                    onClick={() => openReleaseHistory(entry.version)}
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      {entry.features[0]?.title ??
+                        t("workspace:version", { value0: entry.version })}
+                    </span>
+                    <span className="shrink-0 text-[var(--color-text-foreground-secondary)] tabular-nums">
+                      {entry.date}
+                    </span>
+                  </MenuItem>
+                ))}
+                <MenuItem
+                  className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+                  onClick={() => openReleaseHistory(null)}
+                >
+                  <SidebarContextMenuIcon icon={GiftIcon} />
+                  <span>{t("workspace:fullChangelog")}</span>
+                </MenuItem>
+              </MenuGroup>
+              <MenuSeparator />
+              <MenuGroup>
+                {onCustomizeSidebar ? (
+                  <MenuItem
+                    className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+                    onClick={onCustomizeSidebar}
+                  >
+                    <SidebarContextMenuIcon icon={CustomizeIcon} />
+                    <span>{t("workspace:customizeSidebar")}</span>
+                  </MenuItem>
+                ) : null}
+                <MenuItem
+                  className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+                  onClick={onOpenShortcuts}
+                >
+                  <SidebarContextMenuIcon icon={KeyboardIcon} />
+                  <span>{t("common:advanced_keybindings")}</span>
+                </MenuItem>
+                <MenuItem className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME} onClick={onOpenFeedback}>
+                  <SidebarContextMenuIcon icon={FeedbackIcon} />
+                  <span>{t("workspace:sendFeedback")}</span>
+                </MenuItem>
+                <MenuItem
+                  className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+                  onClick={() => openExternalLink(SYNARA_DOCS_URL)}
+                >
+                  <SidebarContextMenuIcon icon={BookIcon} />
+                  <span>{t("workspace:docs")}</span>
+                </MenuItem>
+              </MenuGroup>
+            </ComposerPickerMenuSubPopup>
+          </MenuSub>
+        }
       />
+      {/* Mounted from the first open on, so later closes still animate. Every
+          open already remounts it through `key`, so it starts open either way. */}
+      {releaseHistory.openCount > 0 ? (
+        <Suspense fallback={null}>
+          <ReleaseHistoryDialog
+            key={releaseHistory.openCount}
+            open={releaseHistory.open}
+            onOpenChange={(open) => {
+              setReleaseHistory((prev) => ({ ...prev, open }));
+            }}
+            defaultExpandedVersion={releaseHistory.version}
+          />
+        </Suspense>
+      ) : null}
     </>
   );
 }
@@ -1272,7 +1279,7 @@ export function SidebarActivityBellButton({
 }
 
 const SIDEBAR_SURFACE_PICKER_COPY: Record<SidebarView, { title: string; description: string }> = {
-  threads: { title: "Synara", description: "workspace:buildDebugShip" },
+  threads: { title: APP_BASE_NAME, description: "workspace:buildDebugShip" },
   groups: { title: "common:hubs", description: "workspace:coordinatedAcrossRepos" },
 };
 
@@ -7829,7 +7836,6 @@ export default function Sidebar() {
             void navigate({ to: "/settings", search: { section: "usage" } });
           }}
         />
-        <SidebarHelpMenu inRail {...sidebarHelpMenuProps} />
         {showDesktopUpdateButton && desktopUpdateState ? (
           <DesktopUpdateRailButton
             state={desktopUpdateState}
@@ -7837,7 +7843,7 @@ export default function Sidebar() {
             onClick={handleDesktopUpdateButtonClick}
           />
         ) : null}
-        <AccountFooterControl />
+        <RailAccountMenu {...sidebarHelpMenuProps} />
       </>
     ),
     onContextMenu: handleNavContextMenu,
@@ -7956,6 +7962,15 @@ export default function Sidebar() {
                     onPrewarmView={prewarmSidebarViewTarget}
                   />
                   <div className="ml-auto flex items-center gap-1.5">
+                    {/* Activity bell first, then search, as Codex orders its header. */}
+                    {!isOnGroups ? (
+                      <SidebarActivityBellButton
+                        active={activityViewEnabled}
+                        showUnreadDot={hasUnreadActivity}
+                        shortcutLabel={activityShortcutLabel}
+                        onClick={() => setActivityViewEnabledSmoothly(!activityViewEnabled)}
+                      />
+                    ) : null}
                     <SidebarIconButton
                       icon={SearchIcon}
                       label={t("workspace:primaryActions_search")}
@@ -7971,14 +7986,6 @@ export default function Sidebar() {
                         setSearchPaletteOpen(true);
                       }}
                     />
-                    {!isOnGroups ? (
-                      <SidebarActivityBellButton
-                        active={activityViewEnabled}
-                        showUnreadDot={hasUnreadActivity}
-                        shortcutLabel={activityShortcutLabel}
-                        onClick={() => setActivityViewEnabledSmoothly(!activityViewEnabled)}
-                      />
-                    ) : null}
                     {betaBadge}
                   </div>
                 </div>
@@ -8843,55 +8850,60 @@ export default function Sidebar() {
       ) : null}
 
       {projectAgentDialogProject ? (
-        <GroupSettingsDialog
-          key={projectAgentDialogProject.id}
-          open={projectAgentDialogState !== null}
-          mode={projectAgentDialogState?.mode ?? "onboarding"}
-          projectId={projectAgentDialogProject.id}
-          projectName={projectAgentDialogProject.name}
-          workspacePath={projectAgentDialogProject.cwd}
-          defaultModelSelection={projectAgentDialogProject.defaultModelSelection ?? null}
-          allowDiscard={projectAgentDialogState?.discardable === true}
-          onOpenChange={(open) => {
-            if (!open) {
-              setProjectAgentDialogState(null);
-            }
-          }}
-          onSaved={(overview) => {
-            if (projectAgentDialogState?.mode !== "onboarding") return;
-            const coordinatorThreadId = overview.config?.coordinatorThreadId;
-            const firstMessage = projectAgentDialogState.firstMessage;
-            if (coordinatorThreadId && firstMessage) {
-              void postGroupPickupMessage(coordinatorThreadId, firstMessage);
-            }
-            if (coordinatorThreadId) {
-              pendingCoordinatorActivationRef.current?.cancel();
-              pendingCoordinatorActivationRef.current = {
-                pathname,
-                cancel: activateThreadWhenHydrated({
-                  hasThread: () =>
-                    useStore.getState().sidebarThreadSummaryById[coordinatorThreadId] !== undefined,
-                  subscribe: (listener) => useStore.subscribe(listener),
-                  // The sidebar intent path resolves against the summary map captured at
-                  // render time; a thread created by this dialog hydrates later, so wait
-                  // for its row and then open it directly.
-                  activate: () => {
-                    prewarmThreadDetailForIntent(coordinatorThreadId);
-                    setOptimisticActiveThreadId(coordinatorThreadId);
-                    setSelectionAnchor(coordinatorThreadId);
-                    openChatThreadPage(coordinatorThreadId);
-                    rememberLastThreadRouteNow({ threadId: coordinatorThreadId });
-                    void navigate({
-                      to: "/$threadId",
-                      params: { threadId: coordinatorThreadId },
-                      search: (previous) => ({ ...previous, splitViewId: undefined }),
-                    });
-                  },
-                }),
-              };
-            }
-          }}
-        />
+        // Its own boundary: the first open waits for the chunk with nothing on screen
+        // instead of suspending the sidebar.
+        <Suspense fallback={null}>
+          <GroupSettingsDialog
+            key={projectAgentDialogProject.id}
+            open={projectAgentDialogState !== null}
+            mode={projectAgentDialogState?.mode ?? "onboarding"}
+            projectId={projectAgentDialogProject.id}
+            projectName={projectAgentDialogProject.name}
+            workspacePath={projectAgentDialogProject.cwd}
+            defaultModelSelection={projectAgentDialogProject.defaultModelSelection ?? null}
+            allowDiscard={projectAgentDialogState?.discardable === true}
+            onOpenChange={(open) => {
+              if (!open) {
+                setProjectAgentDialogState(null);
+              }
+            }}
+            onSaved={(overview) => {
+              if (projectAgentDialogState?.mode !== "onboarding") return;
+              const coordinatorThreadId = overview.config?.coordinatorThreadId;
+              const firstMessage = projectAgentDialogState.firstMessage;
+              if (coordinatorThreadId && firstMessage) {
+                void postGroupPickupMessage(coordinatorThreadId, firstMessage);
+              }
+              if (coordinatorThreadId) {
+                pendingCoordinatorActivationRef.current?.cancel();
+                pendingCoordinatorActivationRef.current = {
+                  pathname,
+                  cancel: activateThreadWhenHydrated({
+                    hasThread: () =>
+                      useStore.getState().sidebarThreadSummaryById[coordinatorThreadId] !==
+                      undefined,
+                    subscribe: (listener) => useStore.subscribe(listener),
+                    // The sidebar intent path resolves against the summary map captured at
+                    // render time; a thread created by this dialog hydrates later, so wait
+                    // for its row and then open it directly.
+                    activate: () => {
+                      prewarmThreadDetailForIntent(coordinatorThreadId);
+                      setOptimisticActiveThreadId(coordinatorThreadId);
+                      setSelectionAnchor(coordinatorThreadId);
+                      openChatThreadPage(coordinatorThreadId);
+                      rememberLastThreadRouteNow({ threadId: coordinatorThreadId });
+                      void navigate({
+                        to: "/$threadId",
+                        params: { threadId: coordinatorThreadId },
+                        search: (previous) => ({ ...previous, splitViewId: undefined }),
+                      });
+                    },
+                  }),
+                };
+              }
+            }}
+          />
+        </Suspense>
       ) : null}
 
       {searchPaletteOpen ? (

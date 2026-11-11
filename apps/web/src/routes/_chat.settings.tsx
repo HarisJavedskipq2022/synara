@@ -73,6 +73,7 @@ import {
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { BillingSettingsPanel } from "../components/settings/BillingSettingsPanel";
 import { ACCOUNT_BILLING_ENABLED } from "~/lib/accountBilling";
+import { ActivityBannerSettingsRow } from "../components/settings/ActivityBannerSettingsRow";
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
 import { ExternalMcpSettingsPanel } from "../components/settings/ExternalMcpSettingsPanel";
 import { ConnectionsSettingsPanel } from "../components/settings/ConnectionsSettingsPanel";
@@ -1212,6 +1213,7 @@ function SettingsRouteView() {
           resetLabel: t("settings:asciiBackground"),
           ariaLabel: t("settings:asciiBackground"),
         })}
+        <ActivityBannerSettingsRow />
       </SettingsSection>
 
       <SettingsSection title="settings:typographyAndSpacing">
@@ -1878,7 +1880,7 @@ function SettingsRouteView() {
               {activeSection !== "profile" ? (
                 <div className="mb-8 flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <h1 className="flex items-center gap-2 text-xl font-medium tracking-tight text-foreground">
+                    <h1 className="flex items-center gap-2 text-2xl font-medium tracking-tight text-foreground">
                       {t(activeSectionItem.label)}
                       {activeSectionItem.badge ? (
                         <Badge

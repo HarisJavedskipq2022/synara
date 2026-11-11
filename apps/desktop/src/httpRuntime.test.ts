@@ -21,6 +21,9 @@ it("completes HTTP requests when the socket rejects QoS marking", () => {
       throw Object.assign(new Error("setTypeOfService EINVAL"), { code: "EINVAL", syscall: "setTypeOfService" });
     };
     await import(${JSON.stringify(new URL("./httpRuntime.ts", import.meta.url).href)});
+    // undici 8 publishes its dispatcher under this key as soon as it loads.
+    const maintainedDispatcherKey = Symbol.for("undici.globalDispatcher.2");
+    assert.equal(globalThis[maintainedDispatcherKey], undefined, "undici must load lazily");
     const server = createServer((_req, res) => res.end("ready"));
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -28,6 +31,7 @@ it("completes HTTP requests when the socket rejects QoS marking", () => {
     let dispatcher;
     try {
       const response = await fetch(url);
+      assert.ok(globalThis[maintainedDispatcherKey], "the first fetch installs the dispatcher");
       assert.equal(response.status, 200);
       assert.equal(await response.text(), "ready");
       assert.equal(markings, 0, "default fetch should not mark a fresh socket");

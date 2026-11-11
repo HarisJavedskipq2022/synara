@@ -747,6 +747,13 @@ export function createWsNativeApi(): NativeApi {
       issueDetail: (input) => executionRequest(WS_METHODS.githubInboxIssueDetail, input),
       issueComment: (input) => executionRequest(WS_METHODS.githubInboxIssueComment, input),
     },
+    jira: {
+      status: () => executionRequest(WS_METHODS.jiraStatus),
+      connect: (input) => executionRequest(WS_METHODS.jiraConnect, input),
+      disconnect: () => executionRequest(WS_METHODS.jiraDisconnect),
+      issues: (input) => executionRequest(WS_METHODS.jiraIssues, input),
+      issue: (input) => executionRequest(WS_METHODS.jiraIssue, input),
+    },
     pullRequests: {
       detail: (input) => executionRequest(WS_METHODS.pullRequestsDetail, input),
       diff: (input) => executionRequest(WS_METHODS.pullRequestsDiff, input),
@@ -837,8 +844,8 @@ export function createWsNativeApi(): NativeApi {
       // Claude runs sequential CLI and auth probes, so a refresh can exceed the
       // generic 60-second RPC deadline. Keep this bounded while allowing slow
       // probes to finish; onboarding shows an error if this deadline expires.
-      refreshProviders: () =>
-        executionRequest(WS_METHODS.serverRefreshProviders, undefined, { timeoutMs: 180_000 }),
+      refreshProviders: (input) =>
+        executionRequest(WS_METHODS.serverRefreshProviders, input, { timeoutMs: 180_000 }),
       // Provider updates run up to 2 minutes server-side; callers wrap this in
       // withProviderUpdateTimeout, which owns the client-side watchdog.
       updateProvider: (input) =>

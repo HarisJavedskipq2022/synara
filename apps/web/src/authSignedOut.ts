@@ -1,6 +1,7 @@
 // FILE: authSignedOut.ts
 // Purpose: Replaces authenticated application state after the current browser session logs out.
 import { t } from "~/i18n";
+import { ensureGoogleFontsStylesheet } from "~/lib/googleFonts";
 
 export const AUTH_SIGNED_OUT_PATH = "/signed-out";
 
@@ -8,6 +9,8 @@ function renderSignedOutScreen(): void {
   const root = document.getElementById("root");
   if (!root) return;
 
+  // The screen below is set in DM Sans.
+  ensureGoogleFontsStylesheet();
   document.title = t("common:signedOutSynara");
   root.innerHTML = `
     <main aria-labelledby="signed-out-title" style="min-height:100vh;box-sizing:border-box;display:grid;place-items:center;padding:32px;background:#10110f;color:#f3f0e8;font-family:'DM Sans',sans-serif">

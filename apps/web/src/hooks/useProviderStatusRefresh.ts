@@ -30,6 +30,8 @@ function writeProviderStatusesToConfigCache(
 /**
  * Imperative one-shot provider-status refresh: re-checks providers on the server
  * and folds the result into the cached server config. Surfaces failures as a toast.
+ * Every caller is a user action (refresh button, sign-in check, send or voice
+ * retry, onboarding detection), so it always forces a full re-probe.
  */
 export function useRefreshProviderStatusesNow(): RefreshProviderStatusesNow {
   const { t } = useTranslation();
@@ -39,7 +41,7 @@ export function useRefreshProviderStatusesNow(): RefreshProviderStatusesNow {
     const api = readNativeApi();
     if (!api) return null;
     try {
-      const result = await api.server.refreshProviders();
+      const result = await api.server.refreshProviders({ force: true });
       await writeProviderStatusesToConfigCache(queryClient, result.providers);
       return result.providers;
     } catch (error) {
@@ -108,8 +110,11 @@ export function useProviderStatusRefresh(options: ProviderStatusRefreshOptions):
         return Promise.resolve(false);
       }
       lastRefreshAttemptAtMs = nowMs;
+      // Startup, interval, focus and visibility refreshes are automatic: the
+      // server may reuse a recent probe of a provider that was ready and signed
+      // in, while signed-out or failing providers are still re-probed each time.
       const refresh = api.server
-        .refreshProviders()
+        .refreshProviders({ force: false })
         .then(async (result) => {
           if (disposed) {
             return false;

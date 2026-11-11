@@ -600,6 +600,86 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect(
+    "keeps archived threads, drops soft-deleted ones and still dates the shell by them",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DELETE FROM projection_threads`;
+        yield* sql`DELETE FROM projection_projects`;
+        yield* sql`DELETE FROM projection_state`;
+        yield* sql`
+          INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+          VALUES ('project-soft-delete', 'Soft delete', '/tmp/soft-delete', '[]',
+            '2026-07-21T00:00:00.000Z', '2026-07-21T00:00:00.000Z')
+        `;
+        for (const [id, archivedAt, deletedAt, updatedAt] of [
+          ["thread-live", null, null, "2026-07-21T00:00:01.000Z"],
+          ["thread-archived", "2026-07-21T00:00:02.000Z", null, "2026-07-21T00:00:02.000Z"],
+          ["thread-deleted", null, "2026-07-21T00:00:09.000Z", "2026-07-21T00:00:09.000Z"],
+        ] as const) {
+          yield* sql`
+            INSERT INTO projection_threads
+              (thread_id, project_id, title, model_selection_json, archived_at, deleted_at,
+               created_at, updated_at)
+            VALUES (${id}, 'project-soft-delete', ${id}, '{"provider":"codex","model":"gpt-5"}',
+              ${archivedAt}, ${deletedAt}, '2026-07-21T00:00:00.000Z', ${updatedAt})
+          `;
+        }
+
+        const shell = yield* snapshotQuery.getShellSnapshot();
+        assert.deepEqual(
+          shell.threads.map((thread) => [thread.id, thread.archivedAt]),
+          [
+            [asThreadId("thread-archived"), "2026-07-21T00:00:02.000Z"],
+            [asThreadId("thread-live"), null],
+          ],
+        );
+        // The deleted thread is the newest row, as before the filter moved into SQL.
+        assert.equal(shell.updatedAt, "2026-07-21T00:00:09.000Z");
+
+        // The command read model keeps it so commands can be rejected as "deleted".
+        const commandModel = yield* snapshotQuery.getCommandReadModel();
+        assert.deepEqual(
+          commandModel.threads.map((thread) => [thread.id, thread.deletedAt]),
+          [
+            [asThreadId("thread-archived"), null],
+            [asThreadId("thread-deleted"), "2026-07-21T00:00:09.000Z"],
+            [asThreadId("thread-live"), null],
+          ],
+        );
+
+        // A malformed JSON column still fails the whole read, not just its row.
+        yield* sql`
+          UPDATE projection_threads SET handoff_json = '{not json' WHERE thread_id = 'thread-live'
+        `;
+        const shellError = yield* Effect.flip(snapshotQuery.getShellSnapshot());
+        assert.equal(shellError._tag, "PersistenceDecodeError");
+        assert.equal(
+          shellError._tag === "PersistenceDecodeError" ? shellError.operation : undefined,
+          "ProjectionSnapshotQuery.getShellSnapshot:listThreads:decodeRows",
+        );
+        const commandError = yield* Effect.flip(snapshotQuery.getCommandReadModel());
+        assert.equal(
+          commandError._tag === "PersistenceDecodeError" ? commandError.operation : undefined,
+          "ProjectionSnapshotQuery.getCommandReadModel:listThreads:decodeRows",
+        );
+        // Soft-deleted rows are no longer read by the shell at all.
+        yield* sql`
+          UPDATE projection_threads SET handoff_json = NULL WHERE thread_id = 'thread-live'
+        `;
+        yield* sql`
+          UPDATE projection_threads SET handoff_json = '{not json' WHERE thread_id = 'thread-deleted'
+        `;
+        assert.equal((yield* snapshotQuery.getShellSnapshot()).threads.length, 2);
+
+        yield* sql`DELETE FROM projection_threads`;
+        yield* sql`DELETE FROM projection_projects`;
+      }),
+  );
+
   it.effect("hydrates Space identity and project assignments in full and shell snapshots", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

@@ -25,6 +25,7 @@ import {
 } from "../../lib/terminalContext";
 import { deriveComposerSendState, type PromptHistoryNavigationState } from "../ChatView.logic";
 import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import { composerPromptTraitKey } from "./composerPromptTraitKey";
 import { useComposerAttachmentPersistence } from "./useComposerAttachmentPersistence";
 
 export type ChatComposerDraftController = ReturnType<typeof useChatComposerDraft>;
@@ -155,6 +156,14 @@ export function useChatComposerDraft({ threadId }: ChatComposerDraftInput) {
   );
 
   const promptRef = useRef(prompt);
+  // What trait surfaces (model picker, footer summary) read of the prompt; it changes only
+  // when Ultrathink appears or disappears, so they can skip keystrokes.
+  const promptTraitKey = composerPromptTraitKey(prompt);
+  // For handlers that rewrite the prompt. promptRef is written in the same call as every
+  // composer write of the prompt (typing, trait and history rewrites) and re-synced from
+  // the store after each commit, so a handler sees the text typed so far, never an older
+  // render's.
+  const getPrompt = useCallback(() => promptRef.current, []);
 
   const composerAssistantSelectionsRef = useRef<ComposerAssistantSelectionAttachment[]>(
     composerAssistantSelections,
@@ -466,6 +475,8 @@ export function useChatComposerDraft({ threadId }: ChatComposerDraftInput) {
   return {
     composerDraft,
     prompt,
+    promptTraitKey,
+    getPrompt,
     composerImages,
     composerFiles,
     composerAssistantSelections,

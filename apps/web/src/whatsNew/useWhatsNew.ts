@@ -5,7 +5,8 @@
 // Persists the "already seen this version" marker in localStorage so the popout
 // doesn't reappear after dismissal.
 // Layer: hook — glue between `logic.ts` (pure rules), the changelog data, and
-// the popout + dialog components.
+// the popout + dialog components. The decision reads only `latestEntries.ts`;
+// the full history loads in the background once there is something to show.
 
 import { Schema } from "effect";
 import { useEffect, useRef, useState } from "react";
@@ -13,7 +14,8 @@ import { useEffect, useRef, useState } from "react";
 import { APP_VERSION } from "../branding";
 import { useAnnouncementSheetSlot } from "../components/announcementSheetSlot";
 import { useLocalStorage } from "../hooks/useLocalStorage";
-import { WHATS_NEW_ENTRIES } from "./entries";
+import { loadWhatsNewHistory } from "./history";
+import { LATEST_WHATS_NEW_ENTRIES } from "./latestEntries";
 import {
   resolveWhatsNewState,
   type WhatsNewEntry,
@@ -40,7 +42,11 @@ export interface UseWhatsNewResult {
    * dialog should render.
    */
   readonly currentEntry: WhatsNewEntry | null;
-  /** Full curated history, sorted newest-first, for the changelog view. */
+  /**
+   * Full curated history, sorted newest-first, for the changelog view. Until
+   * the history chunk arrives this holds the latest entries, which are its
+   * first rows.
+   */
   readonly allEntries: readonly WhatsNewEntry[];
   /** Version the popout / dialog is announcing (the installed build). */
   readonly currentVersion: string;
@@ -80,10 +86,13 @@ export interface UseWhatsNewResult {
  * The dialog is never opened automatically — only via the popout card click.
  */
 export function useWhatsNew(options?: {
+  /** Overrides both the decision entries and the history (tests). */
   readonly entries?: readonly WhatsNewEntry[];
   readonly currentVersion?: string;
 }): UseWhatsNewResult {
-  const entries = options?.entries ?? WHATS_NEW_ENTRIES;
+  // The installed build's entry is always among the latest ones
+  // (`latestEntries.test.ts`), so this decides exactly as the full list would.
+  const entries = options?.entries ?? LATEST_WHATS_NEW_ENTRIES;
   const currentVersion = options?.currentVersion ?? APP_VERSION;
 
   const [storage, setStorage] = useLocalStorage(
@@ -127,8 +136,29 @@ export function useWhatsNew(options?: {
   const currentEntry: WhatsNewEntry | null =
     initialState.kind === "show" ? initialState.currentEntry : null;
 
+  // Fetch the complete changelog only when this launch has notes to show. The
+  // user needs two clicks (card, then "View changelog") to reach it, so it has
+  // landed long before it renders.
+  const loadsHistory = options?.entries === undefined && initialState.kind === "show";
+  const [history, setHistory] = useState<readonly WhatsNewEntry[] | null>(null);
+  useEffect(() => {
+    if (!loadsHistory) return;
+    let cancelled = false;
+    loadWhatsNewHistory().then(
+      (loaded) => {
+        if (!cancelled) setHistory(loaded);
+      },
+      () => {
+        // A failed chunk load keeps the latest entries in the changelog view.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [loadsHistory]);
+
   const allEntries: readonly WhatsNewEntry[] =
-    initialState.kind === "show" ? initialState.allEntries : [];
+    initialState.kind === "show" ? (history ?? initialState.allEntries) : [];
 
   const markSeen = () => {
     if (initialState.kind === "show") {

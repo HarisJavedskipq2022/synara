@@ -29,7 +29,14 @@ vi.mock("../lib/serverReactQuery", () => ({
   reconcileServerProviderStatuses: mocks.reconcileServerProviderStatuses,
 }));
 
-import { useProviderStatusRefresh } from "./useProviderStatusRefresh";
+vi.mock("~/i18n", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+import {
+  useProviderStatusRefresh,
+  useRefreshProviderStatusesNow,
+} from "./useProviderStatusRefresh";
 
 function installBrowserGlobals(visibilityState: DocumentVisibilityState) {
   const windowTarget = new EventTarget();
@@ -121,5 +128,39 @@ describe("useProviderStatusRefresh", () => {
 
     expect(refreshProviders).toHaveBeenCalledOnce();
     expect(onRefreshSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("marks startup, focus and visibility refreshes as automatic", async () => {
+    const { documentTarget, windowTarget } = installBrowserGlobals("visible");
+    const refreshProviders = vi.fn().mockResolvedValue({ providers: [] });
+    mocks.readNativeApi.mockReturnValue({ server: { refreshProviders } });
+
+    useProviderStatusRefresh({ initialDelayMs: 0, refreshOnFocus: true });
+    await vi.advanceTimersByTimeAsync(0);
+    windowTarget.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    documentTarget.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(refreshProviders).toHaveBeenCalledTimes(3);
+    for (const call of refreshProviders.mock.calls) {
+      expect(call).toEqual([{ force: false }]);
+    }
+  });
+});
+
+describe("useRefreshProviderStatusesNow", () => {
+  beforeEach(() => {
+    mocks.readNativeApi.mockReset();
+  });
+
+  it("forces a full re-probe for explicit refreshes", async () => {
+    const refreshProviders = vi.fn().mockResolvedValue({ providers: [] });
+    mocks.readNativeApi.mockReturnValue({ server: { refreshProviders } });
+
+    const refreshNow = useRefreshProviderStatusesNow();
+    await expect(refreshNow({ silent: true })).resolves.toEqual([]);
+
+    expect(refreshProviders).toHaveBeenCalledWith({ force: true });
   });
 });

@@ -8,6 +8,7 @@
 //          use floating overlay only. The card surface and content are identical either way.
 // Layer: Environment panel container
 
+import { ActivityBanner } from "~/components/chat/activityBanner/ActivityBanner";
 import { SidePanelOverlay } from "~/components/chat/SidePanelOverlay";
 import type {
   AutomationDefinition,
@@ -148,6 +149,8 @@ export interface EnvironmentPanelProps {
    * stacks under the card; see AmbientRailSlot for the closed-state slide.
    */
   railBottom?: ReactNode;
+  /** Shown as the card title, as Codex names its card after the project. */
+  projectName?: string | null;
   /** Per-thread pinned-message checklist (server-synced). */
   pinnedMessages: readonly PinnedMessage[];
   /** Live text of pinned messages still present in the transcript (for labels/availability). */
@@ -279,6 +282,7 @@ export function EnvironmentPanel({
   onClose,
   onRegisterCommitAndPushTrigger,
   railBottom,
+  projectName,
 }: EnvironmentPanelProps) {
   const { t } = useTranslation();
 
@@ -323,7 +327,9 @@ export function EnvironmentPanel({
       ) : null}
 
       <div className="flex items-center justify-between gap-2 px-2 pb-0.5 pt-0.5">
-        <EnvironmentPanelTitle>{t("chat:general_environmentPanel")}</EnvironmentPanelTitle>
+        <EnvironmentPanelTitle>
+          {projectName || t("chat:general_environmentPanel")}
+        </EnvironmentPanelTitle>
         {/*
           icon-xs centers the 14px gear inside a 28/24px box, insetting it ~7/5px from the
           content edge; pull it back so the glyph's right edge lines up with the rows' chevrons
@@ -597,7 +603,13 @@ export function EnvironmentPanel({
       variant={variant}
       className="items-end gap-3 overflow-y-auto"
       cardClassName="max-h-full w-72"
-      trailing={railBottom}
+      trailing={
+        <>
+          {railBottom}
+          {/* Docked only: there the column beside the composer is reserved for this panel. */}
+          {open && variant === "docked" ? <ActivityBanner /> : null}
+        </>
+      }
     >
       <div className="min-h-0 overflow-y-auto">{content}</div>
     </SidePanelOverlay>

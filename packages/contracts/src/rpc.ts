@@ -298,6 +298,14 @@ import {
   GitHubIssueDetailInput,
 } from "./githubInbox";
 import {
+  JiraConnectInput,
+  JiraIssueDetail,
+  JiraIssueInput,
+  JiraIssuesInput,
+  JiraIssuesResult,
+  JiraStatus,
+} from "./jira";
+import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationEvent,
@@ -388,6 +396,7 @@ import {
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
   ServerProviderUpdateResult,
+  ServerRefreshProvidersInput,
   ServerRefreshProvidersResult,
   ServerStopLocalServerInput,
   ServerStopLocalServerResult,
@@ -1245,6 +1254,36 @@ export const WsGitHubInboxIssueCommentRpc = Rpc.make(WS_METHODS.githubInboxIssue
   error: PullRequestsRpcError,
 });
 
+export const WsJiraStatusRpc = Rpc.make(WS_METHODS.jiraStatus, {
+  payload: Schema.Struct({}),
+  success: JiraStatus,
+  error: WsRpcError,
+});
+
+export const WsJiraConnectRpc = Rpc.make(WS_METHODS.jiraConnect, {
+  payload: JiraConnectInput,
+  success: JiraStatus,
+  error: WsRpcError,
+});
+
+export const WsJiraDisconnectRpc = Rpc.make(WS_METHODS.jiraDisconnect, {
+  payload: Schema.Struct({}),
+  success: JiraStatus,
+  error: WsRpcError,
+});
+
+export const WsJiraIssuesRpc = Rpc.make(WS_METHODS.jiraIssues, {
+  payload: JiraIssuesInput,
+  success: JiraIssuesResult,
+  error: WsRpcError,
+});
+
+export const WsJiraIssueRpc = Rpc.make(WS_METHODS.jiraIssue, {
+  payload: JiraIssueInput,
+  success: JiraIssueDetail,
+  error: WsRpcError,
+});
+
 export const WsPullRequestsDetailRpc = Rpc.make(WS_METHODS.pullRequestsDetail, {
   payload: PullRequestDetailInput,
   success: PullRequestDetail,
@@ -1474,7 +1513,7 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
-  payload: Schema.Struct({}),
+  payload: ServerRefreshProvidersInput,
   success: ServerRefreshProvidersResult,
   error: WsRpcError,
 });
@@ -2388,6 +2427,11 @@ export type WsFeatureRpc =
   | typeof WsGitHubInboxListRpc
   | typeof WsGitHubInboxIssueDetailRpc
   | typeof WsGitHubInboxIssueCommentRpc
+  | typeof WsJiraStatusRpc
+  | typeof WsJiraConnectRpc
+  | typeof WsJiraDisconnectRpc
+  | typeof WsJiraIssuesRpc
+  | typeof WsJiraIssueRpc
   | typeof WsPullRequestsDetailRpc
   | typeof WsPullRequestsDiffRpc
   | typeof WsPullRequestsActionRpc
@@ -2593,6 +2637,11 @@ const wsApplicationRpcGroup = RpcGroup.make(
   WsGitHubInboxListRpc,
   WsGitHubInboxIssueDetailRpc,
   WsGitHubInboxIssueCommentRpc,
+  WsJiraStatusRpc,
+  WsJiraConnectRpc,
+  WsJiraDisconnectRpc,
+  WsJiraIssuesRpc,
+  WsJiraIssueRpc,
   WsPullRequestsDetailRpc,
   WsPullRequestsDiffRpc,
   WsPullRequestsActionRpc,

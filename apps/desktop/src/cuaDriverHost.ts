@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { access, chmod, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -290,20 +290,33 @@ function launchAppMatchNames(input: unknown): string[] {
   return names;
 }
 
+function readCommandOutput(command: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: "utf8" }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
+}
+
 /**
  * A daemon whose host died by SIGKILL never sees retire() and its own stdin
  * watchdog can leave the process wedged: the tokio runtime exits but the
  * AppKit overlay keeps the process alive, leaking a ghost overlay window and
  * its socket dir. Kill any embedded daemon whose recorded host pid is gone.
  * A recycled pid reads as alive and is left alone — safe direction.
+ *
+ * Asynchronous so the `ps` scans stay off the main thread. Running it while
+ * this host is live is safe: its own daemons record this process as their host
+ * pid and its runtime directory names this pid, so both always read as alive.
  */
-export function sweepOrphanedCuaDrivers(): void {
+export async function sweepOrphanedCuaDrivers(): Promise<void> {
   // ps/env scanning exists on every unix the standalone host can run on;
   // Windows orphan reaping is a different mechanism entirely.
   if (process.platform === "win32") return;
   let listing: string;
   try {
-    listing = execFileSync("ps", ["-axo", "pid,args"], { encoding: "utf8" });
+    listing = await readCommandOutput("ps", ["-axo", "pid,args"]);
   } catch {
     return;
   }
@@ -320,9 +333,7 @@ export function sweepOrphanedCuaDrivers(): void {
     if (socketDir) liveSocketDirs.add(socketDir);
     let env: string;
     try {
-      env = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command"], {
-        encoding: "utf8",
-      });
+      env = await readCommandOutput("ps", ["eww", "-p", String(pid), "-o", "command"]);
     } catch {
       continue;
     }

@@ -17,7 +17,7 @@ import { Dialog, DialogPopup, DialogTitle } from "~/components/ui/dialog";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import { Kbd } from "~/components/ui/kbd";
 import { Spinner } from "~/components/ui/spinner";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { useAccount } from "~/hooks/useAccount";
 import { useNowMs } from "~/hooks/useNowMs";
 import {
@@ -797,7 +797,7 @@ function CodeEntryStep({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col items-center gap-3 text-center">
-        <SynaraLogo className="size-8" />
+        <ArborLogo className="size-8" />
         <SignInPanelTitle variant="embedded">Check your email</SignInPanelTitle>
         <p className="text-ui leading-snug text-muted-foreground">
           {entry.resent ? (

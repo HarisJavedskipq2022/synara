@@ -56,8 +56,11 @@ export const SIDEBAR_HEADER_LEADING_ACTION_REVEAL_CLASS_NAME =
   "pointer-events-none opacity-0 md:group-hover/project-header:pointer-events-auto md:group-hover/project-header:opacity-100 md:project-header-focus:pointer-events-auto md:project-header-focus:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
 
 /** Section label ("Threads"/"Pinned" and settings "App"/"Synara"). */
-/** Soft grey of section labels ("Projects", "Chats"); also the rail's resting glyph tone. */
-export const SIDEBAR_SECTION_LABEL_TONE_CLASS_NAME = "text-muted-foreground/58";
+/**
+ * Soft grey of section labels ("Projects", "Chats"); also the rail's resting glyph tone.
+ * About 42% ink on the dark sidebar, the tone measured from Codex's section labels.
+ */
+export const SIDEBAR_SECTION_LABEL_TONE_CLASS_NAME = "text-muted-foreground/72";
 
 export const SIDEBAR_SECTION_LABEL_CLASS_NAME = `text-ui font-normal ${SIDEBAR_SECTION_LABEL_TONE_CLASS_NAME}`;
 

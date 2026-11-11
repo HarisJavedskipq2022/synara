@@ -1,8 +1,19 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { isModelType } from "@earendil-works/pi-ai/utils/model-operations";
-import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { outboundHttp, decodeOutboundJson } from "@synara/shared/outboundHttp";
+import { lazyModule } from "../lazyModule.ts";
+
+// Loaded with the first Pi model runtime instead of at server startup.
+const loadPiOpenCodeProviderModules = lazyModule(async () => {
+  const [opencode, modelOperations] = await Promise.all([
+    import("@earendil-works/pi-ai/providers/opencode"),
+    import("@earendil-works/pi-ai/utils/model-operations"),
+  ]);
+  return {
+    opencodeProvider: opencode.opencodeProvider,
+    isModelType: modelOperations.isModelType,
+  };
+});
 
 const CATALOG_URL = "https://pi.dev/api/models/providers/opencode";
 const INVENTORY_URL = "https://opencode.ai/inference/v1/models";
@@ -103,6 +114,9 @@ export async function refreshPiOpenCodeCatalog(
   if (!runtime.hasConfiguredAuth("opencode")) return;
   if (runtime.getModels("opencode").some((model) => !BASE_URLS[model.api]?.includes(model.baseUrl)))
     return;
+  // Outside the try below, so a broken install is reported rather than read as an
+  // unavailable catalog.
+  const { opencodeProvider, isModelType } = await loadPiOpenCodeProviderModules();
   const controller = new AbortController();
   const signal = AbortSignal.any([
     controller.signal,

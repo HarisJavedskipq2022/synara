@@ -67,6 +67,12 @@ export interface BrowserHostPipeServerOptions {
   readonly automationHost?: Pick<DesktopBrowserAutomationHost, "executeTool">;
   readonly maxInFlightRequests?: number;
   readonly maxQueuedOutputBytes?: number;
+  /**
+   * Requests that arrive before this settles wait for it, so none can reach the
+   * browser before startup state it depends on, such as restored session
+   * cookies, is in place. Settling either way opens the gate.
+   */
+  readonly requestGate?: Promise<unknown>;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -242,6 +248,7 @@ export class BrowserHostPipeServer {
   private readonly maxInFlightRequests: number;
   private readonly maxQueuedOutputBytes: number;
   private readonly capability: string;
+  private requestGate: Promise<void> | null = null;
   private started = false;
 
   constructor(
@@ -274,6 +281,12 @@ export class BrowserHostPipeServer {
       this.drainAutomationHost = () => automationHost.waitForIdle();
     }
     this.server = Net.createServer((socket) => this.handleConnection(socket));
+    if (normalized.requestGate) {
+      const openGate = () => {
+        this.requestGate = null;
+      };
+      this.requestGate = normalized.requestGate.then(openGate, openGate);
+    }
   }
 
   async waitForIdle(): Promise<void> {
@@ -411,6 +424,11 @@ export class BrowserHostPipeServer {
     const controller = new AbortController();
     client.abortControllers.set(request.id, controller);
     try {
+      if (this.requestGate) {
+        await this.requestGate;
+        // The client left or the server shut down while the request waited.
+        if (controller.signal.aborted) return;
+      }
       const result = await this.handleRequest(
         client,
         request.method,

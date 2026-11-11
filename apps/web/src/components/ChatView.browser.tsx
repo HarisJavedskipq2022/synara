@@ -13358,6 +13358,8 @@ describe("ChatView transcript geometry (full app)", () => {
   });
 
   it("disables the ASCII landing decoration from Appearance and releases it on the terminal tab", async () => {
+    // The decoration is off by default, so this starts from a user who turned it on.
+    localStorage.setItem("synara:app-settings:v1", JSON.stringify({ showAsciiBackground: true }));
     const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -14458,7 +14460,7 @@ describe("ChatView transcript geometry (full app)", () => {
             "[data-timeline-row-kind='message'][data-message-role='assistant']",
           ) as HTMLElement | null;
           expect(row).not.toBeNull();
-          expect(row?.className ?? "").toContain("max-w-[var(--app-chat-max-width,46rem)]");
+          expect(row?.className ?? "").toContain("max-w-[var(--app-chat-max-width,42.5rem)]");
           expect(getComputedStyle(row!).maxWidth).toBe("1152px"); // 72rem at 16px root
         },
         { timeout: 8_000, interval: 16 },

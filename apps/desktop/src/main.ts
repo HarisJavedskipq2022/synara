@@ -73,12 +73,8 @@ import type {
   DesktopUpdateActionResult,
   DesktopUpdateState,
 } from "@synara/contracts";
-import {
-  autoUpdater,
-  BaseUpdater,
-  CancellationToken,
-  type UpdateDownloadedEvent,
-} from "electron-updater";
+import type * as ElectronUpdater from "electron-updater";
+import type { CancellationToken, UpdateDownloadedEvent } from "electron-updater";
 
 import { buildContextMenuTemplate } from "./contextMenuTemplate";
 import { isKeyboardShortcutsHelpChord } from "@synara/shared/browserShortcuts";
@@ -105,8 +101,9 @@ import {
 } from "@synara/shared/migrationRecovery";
 import { ensureStaticSnapshot, findAsarArchivePath } from "@synara/shared/staticSnapshot";
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness";
-import { resolveBackendNodeArgs } from "./backendNodeOptions";
+import { backendCompileCacheArgs, resolveBackendNodeArgs } from "./backendNodeOptions";
 import {
+  releaseBackendIpcChannel,
   retainLiveBackendAfterShutdownFailure,
   requireWindowsBackendExit,
   runAfterDesktopShutdown,
@@ -472,6 +469,8 @@ const DESKTOP_BROWSER_HOST_CAPABILITY_FD = 3;
 // for the same lock even when they use the same Electron executable.
 const userDataPath = resolveUserDataPath();
 app.setPath("userData", userDataPath);
+// V8 compile cache for the backend child (see backendCompileCacheArgs).
+const BACKEND_COMPILE_CACHE_DIR = Path.join(userDataPath, "backend-compile-cache");
 
 // Remote shares usage and diagnostics by default; Settings turns both off.
 // Stable stays opt-in for product events and never runs diagnostics.
@@ -646,6 +645,13 @@ const browserOsKeyStore = {
 };
 const browserVault = new BrowserVault(Path.join(BASE_DIR, "browser-vault"), browserOsKeyStore);
 let browserSessionRestore: BrowserSessionRestore | undefined;
+// Settles once bootstrap's session-cookie restore has finished or given up. The
+// restore runs after the backend spawn, so browser host requests wait for this,
+// as they did when the restore ran before the spawn.
+let settleBrowserSessionRestore: () => void = () => {};
+const browserSessionRestoreSettled = new Promise<void>((resolve) => {
+  settleBrowserSessionRestore = resolve;
+});
 const browserVaultCapture = new BrowserVaultCapture(browserVault);
 const browserManager = new DesktopBrowserManager({
   onRuntimeReady: (runtime) => browserVaultCapture.register(runtime),
@@ -739,6 +745,7 @@ async function ensureBrowserHostPipeServer(): Promise<void> {
       if (!threadId) return;
       mainWindow?.webContents.send(IPC.browser.requestOpenPanel, { threadId });
     },
+    requestGate: browserSessionRestoreSettled,
   });
   await server.start();
   browserHostPipeServer = server;
@@ -1083,6 +1090,10 @@ let activeUpdateCheck: Promise<void> | null = null;
 let settleActiveUpdateCheck: (() => void) | null = null;
 let activeUpdatePreparation: Promise<void> | null = null;
 let updaterConfigured = false;
+// Set by configureAutoUpdater when updates are enabled; completeAutoUpdaterSetup
+// clears it once electron-updater is loaded and wired.
+let autoUpdaterSetupPending = false;
+let electronUpdaterModule: typeof ElectronUpdater | undefined;
 let updateState: DesktopUpdateState = initialUpdateState();
 let updateBackgroundedAtMs: number | null = null;
 let updateBackgroundBlurTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1105,9 +1116,20 @@ const pendingUpdateCacheClearQueue = new PendingUpdateCacheClearQueue();
 const macUpdateInstallHandoff =
   process.platform === "darwin"
     ? new MacUpdateInstallHandoff(nativeAutoUpdater, (error) =>
-        autoUpdater.emit("error", error instanceof Error ? error : new Error(String(error))),
+        loadElectronUpdater().autoUpdater.emit(
+          "error",
+          error instanceof Error ? error : new Error(String(error)),
+        ),
       )
     : null;
+
+// electron-updater takes about 17 ms to load and its first check runs 15 s after
+// launch, so it loads on first use instead of before `app ready`. A lazy require
+// keeps it external to the bundle and out of the startup path.
+function loadElectronUpdater(): typeof ElectronUpdater {
+  electronUpdaterModule ??= require("electron-updater") as typeof ElectronUpdater;
+  return electronUpdaterModule;
+}
 
 function getUpdaterInstallBlockedReason(): string | null {
   return macUpdateInstallHandoff?.blockedReason ?? null;
@@ -1508,7 +1530,13 @@ async function handleDesktopMigrationRecovery(): Promise<DesktopMigrationRecover
   const outcome = await recoverDesktopMigrationIfRequired({
     // The gate opens only once the backend has spent its resume budget, while
     // the post-restore verification checks the marker file itself.
-    requiresRecovery: () => requiresDesktopMigrationRecovery(paths),
+    requiresRecovery: () => {
+      const required = requiresDesktopMigrationRecovery(paths);
+      // The prompt offers an in-place update and joins the startup check, so
+      // the updater must be wired (and that check armed) before it appears.
+      if (required) completeAutoUpdaterSetup();
+      return required;
+    },
     markerRemains: () => hasPendingDesktopMigrationRecovery(paths),
     choose: async ({ previousFailure }) => {
       // The user is here because Synara cannot open its database, so the
@@ -3452,7 +3480,7 @@ async function checkForUpdates(reason: string): Promise<void> {
   console.info(`[desktop-updater] Checking for updates (${reason})...`);
 
   try {
-    await autoUpdater.checkForUpdates();
+    await loadElectronUpdater().autoUpdater.checkForUpdates();
   } catch (error: unknown) {
     clearUpdateCheckTimeoutTimer();
     const message = error instanceof Error ? error.message : String(error);
@@ -3506,7 +3534,8 @@ async function downloadAvailableUpdate(): Promise<{
   // Keep existing cancellation suppressions across immediate retries; the old
   // updater cancellation can arrive after a new download has already started.
   lastUpdateDownloadProgressSample = null;
-  const cancellationToken = new CancellationToken();
+  const { autoUpdater, CancellationToken: UpdateCancellationToken } = loadElectronUpdater();
+  const cancellationToken = new UpdateCancellationToken();
   updateDownloadCancellationToken = cancellationToken;
   const downloadStalled = new Promise<never>((_, reject) => {
     rejectUpdateDownloadStall = reject;
@@ -3760,7 +3789,7 @@ async function runDownloadedUpdateInstall(
     if (macUpdateInstallHandoff !== null) {
       macUpdateInstallHandoff.start();
     } else {
-      autoUpdater.quitAndInstall();
+      loadElectronUpdater().autoUpdater.quitAndInstall();
     }
     updateInstallPreparation.requireActive(preparationAttempt);
     armInstallWatchdog();
@@ -3899,6 +3928,17 @@ function configureAutoUpdater(): void {
     configuredUpdaterCacheDirName = null;
     return;
   }
+  // Loading and wiring electron-updater waits for completeAutoUpdaterSetup, which
+  // bootstrap calls right after the backend spawn, before any migration recovery
+  // prompt, and on every exit from bootstrap. Until then updaterConfigured stays
+  // false, so no update path can reach an unhardened updater.
+  autoUpdaterSetupPending = true;
+}
+
+function completeAutoUpdaterSetup(): void {
+  if (!autoUpdaterSetupPending) return;
+  autoUpdaterSetupPending = false;
+  const { autoUpdater, BaseUpdater } = loadElectronUpdater();
   updaterConfigured = true;
   hardenElectronUpdater(
     { BaseUpdater },
@@ -4131,9 +4171,18 @@ async function attachCuaHost(host: CuaDriverHost): Promise<void> {
   );
 }
 
+// The sweep only reaps leftovers of an earlier run that died without cleanup, and
+// nothing at startup reads its result, so it runs in the background after the
+// backend spawn instead of ahead of it.
+function sweepOrphanedCuaDriversInBackground(): void {
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  void sweepOrphanedCuaDrivers().catch((error: unknown) => {
+    safeConsoleError("[desktop] orphaned cua-driver sweep failed", error);
+  });
+}
+
 async function startCuaHost(): Promise<void> {
   if ((process.platform !== "darwin" && process.platform !== "linux") || cuaDriverHost) return;
-  sweepOrphanedCuaDrivers();
   if (process.platform === "linux") {
     linuxEscapeKillSwitchMonitor ??= new LinuxEscapeKillSwitchMonitor({
       shortcutRegistry: globalShortcut,
@@ -4858,7 +4907,12 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
     return;
   }
 
-  const child = ChildProcess.spawn(process.execPath, [...backendNodeArgs(), backendEntry], {
+  const backendArgs = [
+    ...backendNodeArgs(),
+    ...backendCompileCacheArgs(BACKEND_COMPILE_CACHE_DIR),
+    backendEntry,
+  ];
+  const child = ChildProcess.spawn(process.execPath, backendArgs, {
     cwd: resolveBackendCwd(),
     // In Electron main, process.execPath points to the Electron binary.
     // Run the child in Node mode so this backend process does not become a GUI app instance.
@@ -5037,6 +5091,9 @@ async function stopBackendAndWaitForExit(): Promise<void> {
   if (!child) return;
   const backendChild = child;
   if (backendChild.exitCode !== null || backendChild.signalCode !== null) return;
+  // Otherwise the open channel keeps the backend alive after its own shutdown
+  // finishes, and every quit waits for the TERM escalation (see the helper).
+  releaseBackendIpcChannel(backendChild);
 
   if (process.platform === "win32") {
     try {
@@ -6423,6 +6480,33 @@ if (!hasSingleInstanceLock) {
   });
 }
 
+// Restores saved session cookies into the browser partition, bounded by a
+// timeout, then opens the browser host request gate whatever the outcome.
+async function restoreBrowserSessionCookies(restore: BrowserSessionRestore): Promise<void> {
+  try {
+    let restoreTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        restore.initialize().finally(() => clearTimeout(restoreTimer)),
+        new Promise<never>((_, reject) => {
+          restoreTimer = setTimeout(
+            () => reject(new Error("Browser session restoration timed out.")),
+            BROWSER_SESSION_RESTORE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(restoreTimer);
+    }
+  } catch {
+    console.warn(
+      "[Synara browser] Secure session restoration is unavailable; no saved session cookies were restored.",
+    );
+  } finally {
+    settleBrowserSessionRestore();
+  }
+}
+
 async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap start");
   if (!(await requireCurrentDesktopMigrationBundle())) {
@@ -6433,6 +6517,9 @@ async function bootstrap(): Promise<void> {
   // after that return: an install wedged on a bad migration would be unable to
   // update out of it, which is exactly how 0.6.0 stranded its users. The
   // updater touches no database state, so configuring it first is safe.
+  // Loading electron-updater itself waits for completeAutoUpdaterSetup: the
+  // recovery gate calls it before it prompts, the normal path right after the
+  // backend spawn, and finishBootstrap on every other exit.
   configureAutoUpdater();
 
   const migrationRecoveryOutcome = await handleDesktopMigrationRecovery();
@@ -6448,26 +6535,6 @@ async function bootstrap(): Promise<void> {
     createCookieSessionBackend(BROWSER_SESSION_PARTITION),
     browserOsKeyStore,
   );
-  try {
-    let restoreTimer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        browserSessionRestore.initialize().finally(() => clearTimeout(restoreTimer)),
-        new Promise<never>((_, reject) => {
-          restoreTimer = setTimeout(
-            () => reject(new Error("Browser session restoration timed out.")),
-            BROWSER_SESSION_RESTORE_TIMEOUT_MS,
-          );
-        }),
-      ]);
-    } finally {
-      clearTimeout(restoreTimer);
-    }
-  } catch {
-    console.warn(
-      "[Synara browser] Secure session restoration is unavailable; no saved session cookies were restored.",
-    );
-  }
 
   registerIpcHandlers();
   // Apply the saved keep-awake preference at launch, before any window reports.
@@ -6486,6 +6553,8 @@ async function bootstrap(): Promise<void> {
   });
   app.once("will-quit", disposeRemoteResources);
   writeDesktopLogHeader("bootstrap ipc handlers registered");
+  // The backend env reads only the pipe path and the CUA host socket from the
+  // startup work, so the spawn waits for those two and nothing else.
   try {
     await ensureBrowserHostPipeServer();
   } catch (error) {
@@ -6494,6 +6563,17 @@ async function bootstrap(): Promise<void> {
   await startCuaHost();
   startBackend();
   writeDesktopLogHeader("bootstrap backend start requested");
+
+  // The rest runs while the backend boots. The cookie restore must finish
+  // before anything can load a page in the browser partition: the window (its
+  // renderer mounts browser webviews) waits for it below, and browser host
+  // requests from the backend wait for it at the pipe server's request gate.
+  const cookieRestore = restoreBrowserSessionCookies(browserSessionRestore);
+  // In the same synchronous run as the spawn, so the backend's first update
+  // control message cannot arrive before the updater is wired.
+  completeAutoUpdaterSetup();
+  sweepOrphanedCuaDriversInBackground();
+  await cookieRestore;
 
   if (isDevelopment) {
     void waitForBackendWindowReady(backendHttpUrl)
@@ -6521,6 +6601,14 @@ async function bootstrap(): Promise<void> {
   }
 
   ensureInitialBackendWindowOpen(backendHttpUrl);
+}
+
+// Runs after bootstrap however it ended. An early return or a throw must still
+// wire a configured updater, and must not leave browser host requests waiting
+// on a cookie restore that never started. Both calls are no-ops otherwise.
+function finishBootstrap(): void {
+  completeAutoUpdaterSetup();
+  settleBrowserSessionRestore();
 }
 
 app.on("before-quit", (event) => {
@@ -6642,9 +6730,11 @@ if (hasSingleInstanceLock) {
         throw error;
       }
       startBundleSwapWatcher();
-      void bootstrap().catch((error) => {
-        handleFatalStartupError("bootstrap", error);
-      });
+      void bootstrap()
+        .finally(finishBootstrap)
+        .catch((error) => {
+          handleFatalStartupError("bootstrap", error);
+        });
 
       app.on("browser-window-blur", () => {
         markDesktopAppBackgrounded();

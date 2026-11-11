@@ -26,6 +26,7 @@ import {
   deriveSelectedContextWindowSnapshot,
 } from "../../lib/contextWindow";
 import { ComposerModelPicker } from "./ComposerModelPicker";
+import { composerPromptTraitKey } from "./composerPromptTraitKey";
 import { type ProviderModelPickerInstance } from "./ProviderModelPicker";
 
 const THREAD_ID = ThreadId.makeUnsafe("thread-composer-model-picker");
@@ -130,7 +131,8 @@ function Harness(props: HarnessProps) {
       {...(props.onRefreshModels ? { onRefreshModels: props.onRefreshModels } : {})}
       threadId={THREAD_ID}
       modelOptions={modelOptions?.codex}
-      prompt={prompt}
+      promptTraitKey={composerPromptTraitKey(prompt)}
+      getPrompt={() => prompt}
       onPromptChange={(next) => setPrompt(THREAD_ID, next)}
     />
   );
@@ -870,7 +872,8 @@ describe("Claude composer budget suffix", () => {
           onProviderModelChange={vi.fn()}
           threadId={THREAD_ID}
           modelOptions={{ ...(effort ? { effort } : {}), fastMode: true }}
-          prompt=""
+          promptTraitKey=""
+          getPrompt={() => ""}
           onPromptChange={vi.fn()}
           contextWindowLabel={label === "(1M)" ? runtimeLabel : label}
           hideModelLabel={compact}

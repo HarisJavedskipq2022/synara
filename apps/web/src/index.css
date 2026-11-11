@@ -248,8 +248,8 @@
   }
 
   .dark [data-sidebar-layout="rail"] {
-    --app-rail-shell-tone: color-mix(in srgb, var(--color-background-surface) 95%, white);
-    --app-rail-panel-background: color-mix(in srgb, var(--color-background-surface) 98.3%, white);
+    --app-rail-shell-tone: color-mix(in srgb, var(--color-background-surface) 92.5%, white);
+    --app-rail-panel-background: color-mix(in srgb, var(--color-background-surface) 97.9%, white);
     --app-rail-inset-border: color-mix(in srgb, white 9%, transparent);
     --app-rail-inset-border-hover: color-mix(in srgb, white 18%, transparent);
   }
@@ -516,7 +516,7 @@
   /* Depth of the fade where scrolling content meets an edge (transcript, sidebar
      panel, ScrollArea `scrollFade`). */
   --scroll-edge-fade-size: 1.5rem;
-  --radius-user-message: 1rem;
+  --radius-user-message: 1.25rem;
   --font-ui-family: var(
     --theme-font-ui-family,
     -apple-system,
@@ -2056,6 +2056,35 @@ label:has(> select#reasoning-effort) select {
   syntax: "*";
   inherits: false;
 }
+/* Not part of the vendored block. The values the utilities below derive from the
+   animated `--scroll-fade-{t,b,s,e}` would otherwise inherit, so every scroll-timeline
+   tick restyles the whole scrolled subtree. Each one is set and read only on the
+   element that carries the utility, so it never needs to inherit.
+   `scrollFadePropertyRegistration.test.ts` keeps these registered. */
+@property --_scroll-fade-size-t {
+  syntax: "*";
+  inherits: false;
+}
+@property --_scroll-fade-size-b {
+  syntax: "*";
+  inherits: false;
+}
+@property --_scroll-fade-size-s {
+  syntax: "*";
+  inherits: false;
+}
+@property --_scroll-fade-size-e {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-fade-block {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-fade-inline {
+  syntax: "*";
+  inherits: false;
+}
 
 @theme inline {
   @keyframes scroll-fade-reveal-t {
@@ -2476,6 +2505,34 @@ label:has(> select#reasoning-effort) select {
   syntax: "<number>";
   inherits: false;
   initial-value: 0;
+}
+/* Derived from the animated progress, or set inline on the transcript's scroll element
+   (composerOverlayScrollFadeVars) and read only there. Registered as non-inherited so a
+   scroll-timeline tick restyles that element instead of the whole transcript beneath it.
+   `--scroll-edge-fade-size` stays an inherited root token. */
+@property --_scroll-edge-fade-b-start {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-edge-fade-edges {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-edge-fade-glass {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-edge-fade-layer {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-edge-fade-inset-b {
+  syntax: "*";
+  inherits: false;
+}
+@property --scroll-edge-fade-tuck {
+  syntax: "*";
+  inherits: false;
 }
 
 @keyframes scroll-edge-fade-reveal-b {
@@ -2900,7 +2957,7 @@ diffs-container {
 /* Composer shell/surface corner geometry — single source of truth so radius
    tweaks are not split across Tailwind utilities (and HMR cannot leave stale rules). */
 :root {
-  --composer-radius: 1.2rem;
+  --composer-radius: 1.4rem;
 }
 
 .chat-composer-shell,
@@ -3311,10 +3368,35 @@ diffs-container {
   );
 }
 
+/* Dark, opaque window: the composer is a solid raised slab a clear step lighter than the
+   transcript (Codex's #282828 on #101010), not a glass tint that sits at the page tone. */
+:root.dark[data-window-translucency="none"] .chat-composer-surface {
+  background: color-mix(in srgb, var(--color-background-surface) 90.3%, white);
+}
+
 /* Raised panels docked over the transcript (Environment, Library, Project). Opaque, so the
    transcript never bleeds through; a whole-window glass shell swaps the fill below. */
 .chat-raised-panel-surface {
   background: var(--popover);
+}
+
+/* Dark tints measured from Codex. The theme gives the user bubble and the selected row one
+   shared 3% ink tint, which nearly vanishes on these dark surfaces; Codex reads as 5% for the
+   bubble (#1c1c1c on #101010) and 7% for the selected row and active rail tile (#262626 on
+   #161616, #323232 on #232323). Set on the elements so the theme's root values still apply
+   everywhere else. */
+.dark .chat-user-message-bubble {
+  --app-user-message-background: color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+
+.dark [data-sidebar-layout="rail"] {
+  --sidebar-selected: color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+
+/* Dark, opaque window: floating cards sit a clear step above the transcript (Codex's #222222
+   on #101010), between the page tone and the composer slab. */
+:root.dark[data-window-translucency="none"] .chat-raised-panel-surface {
+  background: color-mix(in srgb, var(--color-background-surface) 92.9%, white);
 }
 
 /* ─── Raised chrome on a whole-window glass shell ─────────────────────────────────

@@ -16,11 +16,6 @@ import {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThreadDetailSnapshot,
-  OrchestrationThreadPullRequest,
-  PendingClaudeCacheReview,
-  ThreadPinnedMessages,
-  ThreadSidechatContext,
-  ThreadGoalAchievements,
   ProjectScript,
   ProjectAdditionalFolders,
   ProjectId,
@@ -39,9 +34,6 @@ import {
   OrchestrationThread,
   type OrchestrationThreadShell,
   type OrchestrationThreadActivity,
-  ThreadHandoff,
-  UsageLimitRecovery,
-  UsageLimitRecoverySource,
   ModelSelection,
   type ServerSettings,
 } from "@synara/contracts";
@@ -77,6 +69,13 @@ import {
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import {
+  decodeProjectionThreadDbRows,
+  decodeProjectionThreadShellDbRows,
+  ProjectionThreadDbRowSchema,
+  type ProjectionThreadDbRowRaw,
+  type ProjectionThreadShellDbRowRaw,
+} from "./ProjectionThreadRows.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   ProjectionSnapshotQuery,
@@ -116,52 +115,6 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   }),
 );
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
-const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
-  Struct.assign({
-    isProjectImport: Schema.Number,
-    createBranchFlowCompleted: Schema.Number,
-    isPinned: Schema.Number,
-    usageLimitRecovery: Schema.optional(Schema.NullOr(Schema.fromJsonString(UsageLimitRecovery))),
-    usageLimitRecoverySource: Schema.optional(
-      Schema.NullOr(Schema.fromJsonString(UsageLimitRecoverySource)),
-    ),
-    handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
-    claudeCacheReview: Schema.optional(
-      Schema.NullOr(Schema.fromJsonString(PendingClaudeCacheReview)),
-    ),
-    lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
-    sidechatContext: Schema.optional(Schema.NullOr(Schema.fromJsonString(ThreadSidechatContext))),
-    pinnedMessages: Schema.NullOr(Schema.fromJsonString(ThreadPinnedMessages)),
-    goalAchievements: Schema.optional(
-      Schema.NullOr(Schema.fromJsonString(ThreadGoalAchievements)),
-    ).pipe(Schema.withDecodingDefault(() => null)),
-    modelSelection: ModelSelectionJsonUnknown,
-  }),
-);
-const {
-  pinnedMessages: _projectionThreadPinnedMessagesField,
-  notes: _projectionThreadNotesField,
-  goalAchievements: _projectionThreadGoalAchievementsField,
-  ...ProjectionThreadShellFields
-} = ProjectionThread.fields;
-const ProjectionThreadShellDbRowSchema = Schema.Struct(ProjectionThreadShellFields).mapFields(
-  Struct.assign({
-    isProjectImport: Schema.Number,
-    createBranchFlowCompleted: Schema.Number,
-    isPinned: Schema.Number,
-    usageLimitRecovery: Schema.optional(Schema.NullOr(Schema.fromJsonString(UsageLimitRecovery))),
-    usageLimitRecoverySource: Schema.optional(
-      Schema.NullOr(Schema.fromJsonString(UsageLimitRecoverySource)),
-    ),
-    handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
-    claudeCacheReview: Schema.optional(
-      Schema.NullOr(Schema.fromJsonString(PendingClaudeCacheReview)),
-    ),
-    lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
-    sidechatContext: Schema.optional(Schema.NullOr(Schema.fromJsonString(ThreadSidechatContext))),
-    modelSelection: ModelSelectionJsonUnknown,
-  }),
-);
 /**
  * Narrow projection row for managed-worktree retention. Deliberately keeps
  * soft-deleted threads visible: retention-deleted threads still own on-disk
@@ -220,6 +173,9 @@ const ProjectionCountsRowSchema = Schema.Struct({
 });
 const EmptyProjectShellRepairRowSchema = Schema.Struct({
   required: Schema.Number,
+});
+const DeletedThreadsUpdatedAtRowSchema = Schema.Struct({
+  updatedAt: Schema.NullOr(IsoDateTime),
 });
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
@@ -305,8 +261,6 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
 
-type ProjectionThreadDbRowRaw = Schema.Schema.Type<typeof ProjectionThreadDbRowSchema>;
-type ProjectionThreadShellDbRowRaw = Schema.Schema.Type<typeof ProjectionThreadShellDbRowSchema>;
 type ProjectionProjectDbRowRaw = Schema.Schema.Type<typeof ProjectionProjectDbRowSchema>;
 type ProjectionSpaceDbRow = Schema.Schema.Type<typeof ProjectionSpace>;
 type ProjectionThreadDbRow = Omit<ProjectionThreadDbRowRaw, "modelSelection"> & {
@@ -1053,11 +1007,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       AND project_import_origins.status = 'completed'
   )`;
 
-  const listThreadRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: ProjectionThreadDbRowSchema,
-    execute: () =>
-      sql`
+  // Bulk read of every thread row for the full snapshot and the engine's command
+  // read model. Rows go through the trusted mapper in ProjectionThreadRows.ts
+  // instead of a per-row schema decode. Soft-deleted rows stay: the command read
+  // model needs them to tell "deleted" from "does not exist" (requireThread).
+  const listThreadRows = (_request: void) =>
+    sql`
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
@@ -1119,14 +1074,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           deleted_at AS "deletedAt"
         FROM projection_threads
         ORDER BY created_at ASC, thread_id ASC
-      `,
-  });
+      `.pipe(Effect.flatMap(decodeProjectionThreadDbRows));
 
-  const listThreadShellRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: ProjectionThreadShellDbRowSchema,
-    execute: () =>
-      sql`
+  // Bulk shell read for the connect snapshot, which only returns live threads.
+  // Soft-deleted rows still count toward the snapshot's `updatedAt`; see
+  // readDeletedThreadsUpdatedAt.
+  const listThreadShellRows = (_request: void) =>
+    sql`
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
@@ -1184,7 +1138,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snooze_reminder_at AS "snoozeReminderAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
+        WHERE deleted_at IS NULL
         ORDER BY created_at ASC, thread_id ASC
+      `.pipe(Effect.flatMap(decodeProjectionThreadShellDbRows));
+
+  // The shell's `updatedAt` has always included soft-deleted threads. ISO
+  // timestamps compare the same as text in SQLite and in `maxIso`.
+  const readDeletedThreadsUpdatedAt = SqlSchema.findOne({
+    Request: Schema.Void,
+    Result: DeletedThreadsUpdatedAtRowSchema,
+    execute: () =>
+      sql`
+        SELECT MAX(updated_at) AS "updatedAt"
+        FROM projection_threads
+        WHERE deleted_at IS NOT NULL
       `,
   });
 
@@ -3209,11 +3176,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ]);
+          // threadRows holds live threads only; deleted ones still date the shell.
+          const deletedThreadsUpdatedAt = yield* readDeletedThreadsUpdatedAt(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getShellSnapshot:deletedThreadsUpdatedAt:query",
+                "ProjectionSnapshotQuery.getShellSnapshot:deletedThreadsUpdatedAt:decodeRow",
+              ),
+            ),
+            Effect.map((row) => row.updatedAt),
+          );
 
           const latestTurns = collectProjectedLatestTurns(latestTurnRows);
           const sessions = collectProjectedSessions(sessionRows);
 
           let updatedAt = collectBaseUpdatedAt({ spaceRows, projectRows, threadRows, stateRows });
+          updatedAt = maxOptionalIso(updatedAt, deletedThreadsUpdatedAt);
           updatedAt = maxOptionalIso(updatedAt, latestTurns.updatedAt);
           updatedAt = maxOptionalIso(updatedAt, sessions.updatedAt);
 

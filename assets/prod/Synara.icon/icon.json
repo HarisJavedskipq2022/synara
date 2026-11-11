@@ -2,30 +2,10 @@
   "fill": "automatic",
   "groups": [
     {
-      "blend-mode": "normal",
-      "layers": [
-        {
-          "image-name": "glyph.png",
-          "name": "Y",
-          "glass": true
-        }
-      ],
-      "lighting": "individual",
-      "shadow": {
-        "kind": "layer-color",
-        "opacity": 0.5
-      },
-      "specular": true,
-      "translucency": {
-        "enabled": true,
-        "value": 0.4
-      }
-    },
-    {
       "layers": [
         {
           "image-name": "background.png",
-          "name": "Background"
+          "name": "Arbor"
         }
       ],
       "shadow": {

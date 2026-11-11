@@ -238,6 +238,14 @@ import type {
   GitHubIssueDetailInput,
 } from "./githubInbox";
 import type {
+  JiraConnectInput,
+  JiraIssueDetail,
+  JiraIssueInput,
+  JiraIssuesInput,
+  JiraIssuesResult,
+  JiraStatus,
+} from "./jira";
+import type {
   ProjectCreateLocalFilePreviewGrantInput,
   ProjectCreateLocalFilePreviewGrantResult,
   ProjectDevServerEvent,
@@ -348,6 +356,7 @@ import type {
   ServerListWorktreesResult,
   ServerProviderUpdateInput,
   ServerProviderUpdateResult,
+  ServerRefreshProvidersInput,
   ServerRefreshProvidersResult,
   ServerStopLocalServerInput,
   ServerStopLocalServerResult,
@@ -1384,6 +1393,13 @@ export interface NativeApi {
     issueDetail: (input: GitHubIssueDetailInput) => Promise<GitHubIssueDetail>;
     issueComment: (input: GitHubIssueCommentInput) => Promise<GitHubIssueCommentResult>;
   };
+  jira: {
+    status: () => Promise<JiraStatus>;
+    connect: (input: JiraConnectInput) => Promise<JiraStatus>;
+    disconnect: () => Promise<JiraStatus>;
+    issues: (input: JiraIssuesInput) => Promise<JiraIssuesResult>;
+    issue: (input: JiraIssueInput) => Promise<JiraIssueDetail>;
+  };
   pullRequests: {
     detail: (input: PullRequestDetailInput) => Promise<PullRequestDetail>;
     diff: (input: PullRequestDetailInput) => Promise<PullRequestDiffResult>;
@@ -1437,7 +1453,10 @@ export interface NativeApi {
       input: McpConnectorDisconnectInput,
     ) => Promise<McpConnectorDisconnectResult>;
     getMcpConnectorSetup: () => Promise<McpConnectorSetup>;
-    refreshProviders: () => Promise<ServerRefreshProvidersResult>;
+    /** Omit `input` (or `force`) for an explicit refresh; pass `force: false` for automatic ones. */
+    refreshProviders: (
+      input?: ServerRefreshProvidersInput,
+    ) => Promise<ServerRefreshProvidersResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdateResult>;
     listWorktrees: () => Promise<ServerListWorktreesResult>;
     listLocalServers: () => Promise<ServerListLocalServersResult>;

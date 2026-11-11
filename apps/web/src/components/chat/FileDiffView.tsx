@@ -16,6 +16,7 @@ import { type ReactNode } from "react";
 
 import { buildDiffPanelUnsafeCSS, resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
+import { DiffWorkerPoolScope } from "../DiffWorkerPoolProvider";
 import { FileDiffHeader } from "./FileDiffHeader";
 
 // Keep diff virtualization tuning in one place so every diff surface scrolls identically.
@@ -56,25 +57,28 @@ export function FileDiffCard(props: {
   onLineClick?: ((line: DiffLineClickProps) => void) | undefined;
 }) {
   return (
-    <FileDiff
-      fileDiff={props.fileDiff}
-      options={{
-        diffStyle: props.diffStyle ?? "unified",
-        lineDiffType: "word",
-        overflow: props.overflow ?? "scroll",
-        theme: resolveDiffThemeName(props.theme),
-        themeType: props.theme,
-        unsafeCSS: buildDiffPanelUnsafeCSS(props.theme),
-        ...(props.collapsed !== undefined ? { collapsed: props.collapsed } : {}),
-        ...(props.onLineClick ? { onLineClick: props.onLineClick } : {}),
-      }}
-      renderCustomHeader={(fileDiff) => (
-        <FileDiffHeader
-          fileDiff={fileDiff}
-          theme={props.theme}
-          trailing={props.renderHeaderTrailing?.()}
-        />
-      )}
-    />
+    // The first card under a DiffWorkerPoolProvider starts the shared worker pool.
+    <DiffWorkerPoolScope>
+      <FileDiff
+        fileDiff={props.fileDiff}
+        options={{
+          diffStyle: props.diffStyle ?? "unified",
+          lineDiffType: "word",
+          overflow: props.overflow ?? "scroll",
+          theme: resolveDiffThemeName(props.theme),
+          themeType: props.theme,
+          unsafeCSS: buildDiffPanelUnsafeCSS(props.theme),
+          ...(props.collapsed !== undefined ? { collapsed: props.collapsed } : {}),
+          ...(props.onLineClick ? { onLineClick: props.onLineClick } : {}),
+        }}
+        renderCustomHeader={(fileDiff) => (
+          <FileDiffHeader
+            fileDiff={fileDiff}
+            theme={props.theme}
+            trailing={props.renderHeaderTrailing?.()}
+          />
+        )}
+      />
+    </DiffWorkerPoolScope>
   );
 }

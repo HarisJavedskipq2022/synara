@@ -4,7 +4,7 @@
 // Layer: Settings UI components
 // Exports: PairingQrCode
 
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { useMemo } from "react";
 import { encode, QrCodeDataType } from "uqr";
 
@@ -101,7 +101,7 @@ export function PairingQrCode({
         className="absolute inset-0 m-auto flex items-center justify-center rounded-[28%] text-white"
         style={{ width: logoPixels, height: logoPixels, backgroundColor: INK }}
       >
-        <SynaraLogo className="w-1/2 text-white" />
+        <ArborLogo className="w-1/2 text-white" />
       </span>
     </div>
   );

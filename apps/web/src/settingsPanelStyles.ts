@@ -3,9 +3,6 @@
 // Layer: Settings UI styling
 // Exports: border, surface, card, row, and inset list class names
 
-import { SIDEBAR_SECTION_LABEL_CLASS_NAME } from "./sidebarRowStyles";
-import { SOFT_SURFACE_FILL_CLASS_NAME } from "./surfaceStyles";
-
 /** Corner radius for top-level settings boxes: cards, empty states, dropdown panels. */
 export const SETTINGS_RADIUS_CLASS_NAME = "rounded-xl";
 
@@ -26,17 +23,18 @@ export const SETTINGS_CONTROL_BORDER_CLASS_NAME = "border border-[color:var(--co
  *  so cards/rows read as outline-only on the same background as the chat. */
 export const SETTINGS_PAGE_BACKGROUND_CLASS_NAME = "app-settings-surface";
 
-/** Section label above a settings card — same tone as sidebar "Threads"/"Pinned". */
-export const SETTINGS_SECTION_LABEL_CLASS_NAME = `px-2 py-1 ${SIDEBAR_SECTION_LABEL_CLASS_NAME}`;
+/** Heading above a settings card ("Permissions", "General"): full ink and medium weight, as in
+ *  Codex, so it reads as a heading. The settings sidebar's group labels stay grey. */
+export const SETTINGS_SECTION_LABEL_CLASS_NAME = "px-2 py-1 text-ui font-medium text-foreground";
 
 /** Vertical rhythm between stacked settings groups in the content panel. */
 export const SETTINGS_PANEL_SECTION_CLASS_NAME = "flex flex-col gap-1.5 not-first:mt-4";
 
-/** Grouped settings card: the same faint fill as a `soft` input (the settings search
- *  field), so cards read as one material lifted just off the page surface. */
+/** Grouped settings card: a 4% ink fill, a clear step off the page as Codex draws its cards
+ *  (#191919 on #101010). Soft inputs inside a card add their own faint fill on top. */
 export const SETTINGS_CARD_CLASS_NAME = [
   "overflow-hidden",
-  SOFT_SURFACE_FILL_CLASS_NAME,
+  "bg-foreground/4",
   SETTINGS_CONTROL_BORDER_CLASS_NAME,
   SETTINGS_RADIUS_CLASS_NAME,
 ].join(" ");

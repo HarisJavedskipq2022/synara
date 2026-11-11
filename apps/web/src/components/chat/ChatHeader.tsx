@@ -849,6 +849,8 @@ export function ChatHeader({
                 tooltip={t("chat:library")}
               />
             ) : null}
+            {/* A hairline sets the chat's own panel toggles apart from the window's dock toggle. */}
+            {rightPanelToggleControl ? <ChatHeaderGroupDivider /> : null}
             {rightPanelToggleControl}
           </>
         ) : (

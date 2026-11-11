@@ -11,15 +11,16 @@ describe("desktop artifact identity", () => {
     "preserves the production %s package and artifact names",
     (platform) => {
       const result = createDesktopArtifactIdentity({ platform, flavor: "production" });
+      const { bundleId, displayName } = synaraDesktopIdentity("production");
       expect(result.packageMetadata).toEqual({
         name: "synara-desktop",
-        productName: "Synara",
+        productName: displayName,
         synaraDesktopFlavor: "production",
       });
       expect(result.buildConfig).toEqual({
-        appId: "com.emanueledipietro.synara",
-        productName: "Synara",
-        artifactName: "Synara-${version}-${arch}.${ext}",
+        appId: bundleId,
+        productName: displayName,
+        artifactName: `${displayName}-\${version}-\${arch}.\${ext}`,
       });
       expect(result.releaseDirectoryName).toBe("release");
       expect(result.identity.usesScriptedUpdates).toBe(false);
@@ -65,7 +66,7 @@ describe("desktop artifact identity", () => {
       });
       expect(synaraDesktopIdentity(runtimeFlavor)).toEqual(result.identity);
       expect(result.buildConfig).toMatchObject({
-        appId: "com.emanueledipietro.synara.remote",
+        appId: synaraDesktopIdentity("remote").bundleId,
         productName: "Synara Remote",
         artifactName: "Synara-Remote-${version}-${arch}.${ext}",
         protocols: [{ name: "Synara Remote", schemes: ["synara-remote"] }],

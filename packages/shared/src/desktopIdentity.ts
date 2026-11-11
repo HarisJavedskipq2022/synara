@@ -5,7 +5,10 @@ export const SYNARA_DESKTOP_SCHEME = "synara";
 export const SYNARA_DESKTOP_ORIGIN = `${SYNARA_DESKTOP_SCHEME}://app`;
 export const SYNARA_DESKTOP_ENTRY_URL = `${SYNARA_DESKTOP_ORIGIN}/index.html`;
 export const SYNARA_DESKTOP_UPDATE_CHANNEL = "synara";
-export const SYNARA_PRODUCTION_BUNDLE_ID = "com.emanueledipietro.synara";
+// This fork ships as Arbor. Only what a person sees or what must not collide with an installed
+// Synara (or the earlier Arbor app, which owns `dev.arbor.desktop`, `~/.arbor` and the "Arbor"
+// profile folder) is renamed here; internal `synara` names stay so upstream changes still merge.
+export const SYNARA_PRODUCTION_BUNDLE_ID = "dev.arbor.app";
 export const SYNARA_DEVELOPMENT_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.dev`;
 export const SYNARA_CANARY_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.canary`;
 /** Display/setup identity of the GUI host; this value does not confer native authority. */
@@ -191,25 +194,25 @@ export function synaraDesktopIdentity(flavor: SynaraDesktopFlavor): SynaraDeskto
   if (flavor === "development") {
     return {
       flavor,
-      displayName: "Synara (Dev)",
+      displayName: "Arbor (Dev)",
       bundleId: SYNARA_DEVELOPMENT_BUNDLE_ID,
       scheme: SYNARA_DESKTOP_SCHEME,
       origin: SYNARA_DESKTOP_ORIGIN,
       entryUrl: SYNARA_DESKTOP_ENTRY_URL,
-      userDataDirectoryName: "synara-dev",
-      defaultHomeDirectoryName: ".synara-dev",
+      userDataDirectoryName: "arbor-app-dev",
+      defaultHomeDirectoryName: ".arbor-app-dev",
       usesScriptedUpdates: false,
     };
   }
   return {
     flavor,
-    displayName: "Synara",
+    displayName: "Arbor",
     bundleId: SYNARA_PRODUCTION_BUNDLE_ID,
     scheme: SYNARA_DESKTOP_SCHEME,
     origin: SYNARA_DESKTOP_ORIGIN,
     entryUrl: SYNARA_DESKTOP_ENTRY_URL,
-    userDataDirectoryName: "synara",
-    defaultHomeDirectoryName: ".synara",
+    userDataDirectoryName: "arbor-app",
+    defaultHomeDirectoryName: ".arbor-app",
     usesScriptedUpdates: false,
   };
 }

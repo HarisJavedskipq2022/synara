@@ -15,6 +15,8 @@ import { useState, type ReactNode } from "react";
 
 import type { FastModeNotice } from "~/lib/fastModeState";
 import { cn } from "~/lib/utils";
+import { selectComposerThreadDraft } from "../../composerDraftDomain";
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { type ProviderOptions } from "../../providerModelOptions";
 import { MenuRadioGroup, MenuRadioItem, MenuSub, MenuSubTrigger } from "../ui/menu";
 import { ComposerEffortSliderCard } from "./ComposerEffortSliderCard";
@@ -84,7 +86,6 @@ export function ComposerModelPickerTraitRows(props: {
   runtimeModel: ProviderModelDescriptor | undefined;
   runtimeAgents: ReadonlyArray<ProviderAgentDescriptor> | null | undefined;
   modelOptions: ProviderOptions | undefined;
-  prompt: string;
   onPromptChange: (prompt: string) => void;
   // "slider" swaps the Effort and Speed rows for the stepped slider card, which owns
   // both. Models without an effort ladder always keep the rows.
@@ -93,7 +94,12 @@ export function ComposerModelPickerTraitRows(props: {
 }) {
   const { t } = useTranslation();
 
-  const { provider, threadId, model, modelOptions, prompt } = props;
+  const { provider, threadId, model, modelOptions } = props;
+  // The rows mount only while the picker is open, so subscribing to the prompt here costs
+  // nothing while the user types with the picker closed. Effort choices rewrite this text.
+  const prompt = useComposerDraftStore(
+    (store) => selectComposerThreadDraft(store, threadId).prompt,
+  );
   const selection = getComposerTraitSelection(
     provider,
     model,

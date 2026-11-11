@@ -8,8 +8,9 @@ import type {
   ProviderListPluginsResult,
   ProviderListSkillsResult,
   ProviderSkillsCatalogResult,
+  ServerProviderStatus,
 } from "@synara/contracts";
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import { ensureNativeApi } from "~/nativeApi";
 import {
   expensiveReadErrorRefetchInterval,
@@ -260,6 +261,56 @@ function requireDiscoveredModels(
     throw new Error(`${provider} model discovery returned no models.`);
   }
   return result;
+}
+
+/**
+ * Providers whose server-side model discovery refuses to run while the last
+ * health probe says the account is signed out (SIGNED_OUT_DISCOVERY_BLOCKED_PROVIDERS
+ * in ProviderDiscoveryService.ts). Their models query holds that refusal until
+ * something refetches it, so a sign-in must trigger the refetch.
+ */
+// Keyed by driver string: statuses can name drivers this build does not support.
+const SIGN_IN_GATED_MODEL_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set<ProviderKind>([
+  "cursor",
+]);
+
+function providerStatusInstanceIdentity(status: ServerProviderStatus): string {
+  return `${status.driver ?? status.provider}\u0000${status.instanceId ?? status.provider}`;
+}
+
+/**
+ * Refetches the models of a sign-in-gated provider instance once, when its
+ * status turns from unauthenticated to authenticated. Repeated authenticated
+ * pushes and every other provider leave their queries alone.
+ */
+export function invalidateModelsAfterSignIn(
+  queryClient: QueryClient,
+  previous: readonly ServerProviderStatus[] | undefined,
+  next: readonly ServerProviderStatus[],
+): void {
+  if (!previous || previous.length === 0) return;
+  const previousAuth = new Map(
+    previous.map((status) => [providerStatusInstanceIdentity(status), status.authStatus]),
+  );
+  for (const status of next) {
+    const driver = status.driver ?? status.provider;
+    if (!SIGN_IN_GATED_MODEL_DISCOVERY_PROVIDERS.has(driver)) continue;
+    if (status.authStatus !== "authenticated") continue;
+    if (previousAuth.get(providerStatusInstanceIdentity(status)) !== "unauthenticated") continue;
+    const instanceId = status.instanceId ?? status.provider;
+    void queryClient.invalidateQueries({
+      predicate: (query) => {
+        const [scope, kind, provider, keyInstanceId] = query.queryKey;
+        return (
+          scope === providerDiscoveryQueryKeys.modelsAll[0] &&
+          kind === providerDiscoveryQueryKeys.modelsAll[1] &&
+          provider === driver &&
+          // The default instance's models key may omit its instance id.
+          (keyInstanceId === instanceId || (keyInstanceId == null && instanceId === driver))
+        );
+      },
+    });
+  }
 }
 
 export const providerDiscoveryQueryKeys = {

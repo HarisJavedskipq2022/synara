@@ -64,3 +64,34 @@ export function resolveBackendNodeArgs(input: {
     }),
   );
 }
+
+// Gives the backend a V8 compile cache so later launches skip recompiling its
+// bundle. It is enabled from a preload in the backend's own argv rather than with
+// NODE_COMPILE_CACHE: that env var would reach every terminal, provider CLI and
+// tool the backend spawns, while argv stays with the backend and its worker
+// threads. Node creates the directory; one it cannot create or write leaves the
+// cache off without an error. NODE_COMPILE_CACHE and NODE_DISABLE_COMPILE_CACHE
+// set by the user win.
+//
+// Node writes the cache only on a normal exit, and the desktop usually ends the
+// backend with SIGTERM, so the preload also flushes it on unref'd timers: once
+// after startup has settled and once later for lazily loaded modules such as
+// provider SDKs. The namespace import and the guards keep a Node without these
+// functions, or a failed write, from affecting the backend.
+export const BACKEND_COMPILE_CACHE_FLUSH_DELAYS_MS: readonly number[] = [10_000, 120_000];
+
+export function backendCompileCacheArgs(
+  cacheDirectory: string | null | undefined,
+  flushDelaysMs: readonly number[] = BACKEND_COMPILE_CACHE_FLUSH_DELAYS_MS,
+): string[] {
+  if (!cacheDirectory) {
+    return [];
+  }
+  const delays = JSON.stringify(flushDelaysMs.filter((delay) => Number.isFinite(delay)));
+  const preload =
+    `import*as m from"node:module";` +
+    `try{m.enableCompileCache(${JSON.stringify(cacheDirectory)})}catch{}` +
+    `const f=()=>{try{m.flushCompileCache?.()}catch{}};` +
+    `for(const d of ${delays})setTimeout(f,d).unref();`;
+  return [`--import=data:text/javascript,${encodeURIComponent(preload)}`];
+}

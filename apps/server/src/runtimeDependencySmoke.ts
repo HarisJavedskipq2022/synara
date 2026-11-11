@@ -209,6 +209,16 @@ await import("node-pty");
 await import("@xterm/headless");
 // Connectors load the MCP SDK's OAuth client on first use.
 await import("@modelcontextprotocol/sdk/client/auth.js");
+// Local (stdio) connectors load the MCP client and its schemas on first use too.
+await import("@modelcontextprotocol/sdk/client/index.js");
+await import("@modelcontextprotocol/sdk/types.js");
+// The Pi adapter loads these pi-ai entry points on first use (PiAdapter.ts,
+// piOpenCodeCatalog.ts), so server startup no longer proves they resolve.
+await import("@earendil-works/pi-ai/compat");
+await import("@earendil-works/pi-ai/providers/azure");
+await import("@earendil-works/pi-ai/providers/opencode");
+await import("@earendil-works/pi-ai/providers/openrouter");
+await import("@earendil-works/pi-ai/utils/model-operations");
 
 const { parsePatchFiles } = await import("@pierre/diffs");
 const patches = parsePatchFiles(

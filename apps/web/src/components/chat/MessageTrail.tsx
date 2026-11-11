@@ -725,8 +725,8 @@ export function MessageTrail({
           "--message-trail-content-inset": `${contentInsetRightPx}px`,
           width: RAIL_WIDTH_PX,
           // CSS resolves rem, percentage/full-width, and live preference changes.
-          // Observe this constrained box, rather than assuming a fixed 46rem column.
-          maxWidth: `max(0px, calc((100% - var(--app-chat-max-width, 46rem) - var(--message-trail-content-inset)) / 2 - ${RAIL_CONTENT_CLEARANCE_PX}px))`,
+          // Observe this constrained box, rather than assuming a fixed 42.5rem column.
+          maxWidth: `max(0px, calc((100% - var(--app-chat-max-width, 42.5rem) - var(--message-trail-content-inset)) / 2 - ${RAIL_CONTENT_CLEARANCE_PX}px))`,
         } as CSSProperties
       }
     >

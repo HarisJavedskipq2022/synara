@@ -21,7 +21,7 @@ import type {
   ServerSettings,
 } from "@synara/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, Layer, Stream } from "effect";
+import { Cause, Effect, Exit, Layer, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -604,6 +604,122 @@ describe("ProviderDiscoveryService.listModels", () => {
     expect(result.enabledAgents.source).toBe("opencode");
     expect(result.enabledCommands.source).toBe("opencode");
     expect(adapterCalls).toEqual(["agents", "commands"]);
+  });
+
+  it("does not start Cursor model discovery while the last probe says it is signed out", async () => {
+    const cursorStatus = (authStatus: ServerProviderStatus["authStatus"]) =>
+      ({
+        provider: "cursor",
+        instanceId: "cursor",
+        driver: "cursor",
+        status: authStatus === "authenticated" ? "ready" : "error",
+        available: true,
+        authStatus,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        ...(authStatus === "unauthenticated"
+          ? { message: "Cursor Agent is not authenticated. Run `cursor-agent login`." }
+          : {}),
+      }) satisfies ServerProviderStatus;
+    const listOnce = (authStatus: ServerProviderStatus["authStatus"]) => {
+      // Start each run without the catalog the previous run persisted.
+      rmSync(baseDir, { recursive: true, force: true });
+      let adapterCalls = 0;
+      const baseLayer = Layer.mergeAll(
+        makeConfigLayer(() => [cursorStatus(authStatus)]),
+        ServerSettingsService.layerTest(),
+        makeRegistryLayer({
+          listModels: () => {
+            adapterCalls += 1;
+            return Effect.succeed({
+              models: [{ slug: "cursor-model", name: "Cursor Model" }],
+              source: "cursor.acp",
+              cached: false,
+            });
+          },
+        }),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      const testLayer = ProviderDiscoveryServiceLive.pipe(Layer.provideMerge(baseLayer));
+      return Effect.runPromise(
+        Effect.gen(function* () {
+          const discovery = yield* ProviderDiscoveryService;
+          return yield* Effect.exit(discovery.listModels({ provider: "cursor", cwd }));
+        }).pipe(Effect.provide(testLayer)) as Effect.Effect<
+          Exit.Exit<ProviderListModelsResult, unknown>,
+          never,
+          never
+        >,
+      ).then((exit) => ({ exit, adapterCalls }));
+    };
+
+    const signedOut = await listOnce("unauthenticated");
+    expect(signedOut.adapterCalls).toBe(0);
+    expect(Exit.isFailure(signedOut.exit)).toBe(true);
+    if (Exit.isFailure(signedOut.exit)) {
+      const error = Cause.squash(signedOut.exit.cause);
+      expect(error).toBeInstanceOf(ProviderAdapterRequestError);
+      expect((error as ProviderAdapterRequestError).detail).toContain("not authenticated");
+    }
+
+    for (const authStatus of ["authenticated", "unknown"] as const) {
+      const allowed = await listOnce(authStatus);
+      expect(allowed.adapterCalls).toBe(1);
+      expect(Exit.isSuccess(allowed.exit)).toBe(true);
+    }
+  });
+
+  it("runs Cursor model discovery right after the status flips to signed in", async () => {
+    let authStatus: ServerProviderStatus["authStatus"] = "unauthenticated";
+    let adapterCalls = 0;
+    const baseLayer = Layer.mergeAll(
+      makeConfigLayer(() => [
+        {
+          provider: "cursor",
+          instanceId: "cursor",
+          driver: "cursor",
+          status: authStatus === "authenticated" ? "ready" : "error",
+          available: true,
+          authStatus,
+          checkedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ]),
+      ServerSettingsService.layerTest(),
+      makeRegistryLayer({
+        listModels: () => {
+          adapterCalls += 1;
+          return Effect.succeed({
+            models: [{ slug: "cursor-model", name: "Cursor Model" }],
+            source: "cursor.acp",
+            cached: false,
+          });
+        },
+      }),
+    ).pipe(Layer.provideMerge(NodeServices.layer));
+    const testLayer = ProviderDiscoveryServiceLive.pipe(Layer.provideMerge(baseLayer));
+
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const discovery = yield* ProviderDiscoveryService;
+        const signedOut = yield* Effect.exit(discovery.listModels({ provider: "cursor", cwd }));
+        // `cursor-agent login` in a terminal; the next health probe reports it.
+        authStatus = "authenticated";
+        const signedIn = yield* discovery.listModels({ provider: "cursor", cwd });
+        return { signedOut, signedIn };
+      }).pipe(Effect.provide(testLayer)) as Effect.Effect<
+        {
+          signedOut: Exit.Exit<ProviderListModelsResult, unknown>;
+          signedIn: ProviderListModelsResult;
+        },
+        never,
+        never
+      >,
+    );
+
+    expect(Exit.isFailure(outcome.signedOut)).toBe(true);
+    // Within the 30-second failure-replay window, yet discovery runs instead of
+    // replaying the earlier refusal.
+    expect(outcome.signedIn.models).toEqual([{ slug: "cursor-model", name: "Cursor Model" }]);
+    expect(outcome.signedIn.cached).toBe(false);
+    expect(adapterCalls).toBe(1);
   });
 
   it("does not invoke the adapter for a disabled provider", async () => {

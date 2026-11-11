@@ -5,9 +5,9 @@
 
 import type { ReactNode } from "react";
 
-/** Panel title type: display face at the title size (titles may use a fixed size). */
+/** Panel title type: the system face, semibold, at the title size (titles may use a fixed size). */
 export const SIDEBAR_PANEL_TITLE_CLASS_NAME =
-  "font-display min-w-0 truncate text-[17px] text-foreground";
+  "min-w-0 truncate font-system-ui text-[17px] font-semibold text-foreground";
 
 export function SidebarPanelTitle({
   title,

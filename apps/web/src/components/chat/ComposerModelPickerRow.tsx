@@ -27,6 +27,7 @@ import {
 } from "./ComposerModelPicker.logic";
 import { ComposerPickerMenuSubPopup } from "./ComposerPickerMenuPopup";
 import { COMPOSER_MUTED_ACCENT_TEXT_CLASS_NAME } from "./composerPickerStyles";
+import type { ComposerPromptTraitKey } from "./composerPromptTraitKey";
 import { getComposerTraitSelection } from "./composerTraits";
 import { ModelStarButton } from "./ModelStarButton";
 import { PICKER_PANEL_ROW_SELECTED_CLASS_NAME } from "./pickerPanelStyles";
@@ -43,7 +44,8 @@ export function ComposerModelPickerRow(props: {
   /** Provider options the row's model would run with (drives its effort + star state). */
   providerOptions: ProviderOptions | undefined;
   runtimeModels: ReadonlyArray<ProviderModelDescriptor> | null | undefined;
-  prompt: string;
+  /** The composer prompt as trait resolution reads it (`composerPromptTraitKey`). */
+  promptTraitKey: ComposerPromptTraitKey;
   /** `starredModelSlotKey`s of every starred preset. */
   starredModelSlots: ReadonlySet<string>;
   onSelect: (row: PickerRow) => void;
@@ -58,7 +60,7 @@ export function ComposerModelPickerRow(props: {
   const selection = getComposerTraitSelection(
     row.provider,
     row.model,
-    props.prompt,
+    props.promptTraitKey,
     props.providerOptions,
     resolveRuntimeModelDescriptor({
       provider: row.provider,

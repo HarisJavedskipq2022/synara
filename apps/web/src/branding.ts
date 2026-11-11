@@ -1,7 +1,7 @@
 // Renderer branding follows the packaged protocol defined by desktopIdentity.
 import { SYNARA_REMOTE_DESKTOP_SCHEME } from "@synara/shared/desktopIdentity";
 
-export const APP_BASE_NAME = "Synara";
+export const APP_BASE_NAME = "Arbor";
 const isCanaryDesktop =
   typeof window !== "undefined" && window.location?.protocol === "synara-canary:";
 const isBetaDesktop = typeof window !== "undefined" && window.location?.protocol === "synara-beta:";

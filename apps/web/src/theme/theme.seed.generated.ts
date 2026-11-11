@@ -130,8 +130,11 @@ export const THEME_SEED_CATALOG: Record<string, Partial<Record<ThemeVariant, Chr
   },
   codex: CODEX_THEME_SEEDS,
   synara: {
-    dark: { ...CODEX_THEME_SEEDS.dark, accent: "#f2612d" },
-    light: { ...CODEX_THEME_SEEDS.light, accent: "#c74614" },
+    // Opaque by default: the shell's three tones (frame, sidebar, chat) and the raised composer
+    // and cards only read as layers on a solid window; on glass they share one coat. Window
+    // translucency stays available under Settings → Appearance.
+    dark: { ...CODEX_THEME_SEEDS.dark, accent: "#f2612d", opaqueWindows: true },
+    light: { ...CODEX_THEME_SEEDS.light, accent: "#c74614", opaqueWindows: true },
   },
   dracula: {
     dark: {

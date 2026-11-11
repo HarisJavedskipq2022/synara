@@ -74,7 +74,7 @@ import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { LinkChipIcon } from "../LinkChipIcon";
 import { McpServerIcon } from "./McpServerIcon";
 import { normalizeCompactToolLabel } from "./MessagesTimeline.logic";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { ToolCallDetailsContent } from "./ToolCallDetailsDialog";
 import { DisclosureChevron } from "../ui/DisclosureChevron";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
@@ -123,7 +123,7 @@ type TimelineWorkEntry = WorkLogEntry;
 const AgentTaskIcon: LucideIcon = (props) => <BotIcon {...props} />;
 
 const SynaraToolIcon: LucideIcon = ({ className, ...props }) => (
-  <SynaraLogo {...props} className={cn("text-current", className)} />
+  <ArborLogo {...props} className={cn("text-current", className)} />
 );
 
 function workToneIcon(tone: TimelineWorkEntry["tone"]): {

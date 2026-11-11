@@ -5,6 +5,7 @@
 // Layer: Web account feature (sidebar footer).
 
 import { useNavigate } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { toastManager } from "~/components/ui/toast";
 import {
   Menu,
@@ -38,12 +39,21 @@ function settingsShortcutLabel(): string {
   return isMacPlatform(navigator.platform) ? "⌘," : "Ctrl+,";
 }
 
-export function AccountFooterControl() {
+export function AccountFooterControl({
+  menuExtras,
+}: {
+  /** Extra rows shown under Settings in both menus, e.g. the rail's Help submenu. */
+  menuExtras?: ReactNode;
+}) {
   const account = useAccount();
-  return account.me ? <SignedInFooter /> : <SignedOutFooter />;
+  return account.me ? (
+    <SignedInFooter menuExtras={menuExtras} />
+  ) : (
+    <SignedOutFooter menuExtras={menuExtras} />
+  );
 }
 
-function SignedInFooter() {
+function SignedInFooter({ menuExtras }: { menuExtras?: ReactNode }) {
   const account = useAccount();
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -157,6 +167,7 @@ function SignedInFooter() {
             <span>Settings</span>
             <MenuShortcut>{settingsShortcutLabel()}</MenuShortcut>
           </MenuItem>
+          {menuExtras}
         </MenuGroup>
         <MenuSeparator />
         <MenuGroup>
@@ -171,7 +182,7 @@ function SignedInFooter() {
   );
 }
 
-function SignedOutFooter() {
+function SignedOutFooter({ menuExtras }: { menuExtras?: ReactNode }) {
   const navigate = useNavigate();
   const openSignIn = useAccountDialogStore((state) => state.openSignIn);
 
@@ -181,10 +192,14 @@ function SignedOutFooter() {
         <SidebarIconButton
           render={<MenuTrigger />}
           icon={UserIcon}
-          iconClassName="size-5"
           label="Sign in"
           className={appRailButtonClassName(false)}
-        />
+        >
+          {/* Same round footprint as the signed-in picture, so the corner keeps its shape. */}
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--foreground)_12%,transparent)]">
+            <UserIcon className="size-4" />
+          </span>
+        </SidebarIconButton>
       </RemoteConnectionsCoachmark>
       <ComposerPickerMenuPopup side="right" align="end" className="w-64 min-w-64">
         <MenuGroup>
@@ -213,6 +228,7 @@ function SignedOutFooter() {
             <span>Settings</span>
             <MenuShortcut>{settingsShortcutLabel()}</MenuShortcut>
           </MenuItem>
+          {menuExtras}
         </MenuGroup>
       </ComposerPickerMenuPopup>
     </Menu>

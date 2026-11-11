@@ -13,7 +13,13 @@ import babel from "@rolldown/plugin-babel";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { defineConfig, type Plugin } from "vite";
 import pkg from "./package.json" with { type: "json" };
-import { listFiles, pruneProductionIcons } from "./scripts/production-assets";
+import {
+  applyCentralIconStrokeWidth,
+  applyProductionIconStrokeWidth,
+  CENTRAL_OUTLINE_ICON_DIRECTORY,
+  listFiles,
+  pruneProductionIcons,
+} from "./scripts/production-assets";
 
 const port = Number(process.env.PORT ?? 5733);
 const sourcemapEnv = process.env.SYNARA_WEB_SOURCEMAP?.trim().toLowerCase();
@@ -46,6 +52,7 @@ function centralIconPrunePlugin(): Plugin {
           path.resolve(resolvedRoot, "../../packages/contracts/src"),
           path.resolve(resolvedRoot, "../../packages/shared/src"),
         ]);
+        await applyProductionIconStrokeWidth(resolvedOutDir);
         // MSW is used by the dev-served browser tests, never the production app.
         await Promise.all(
           ["", ".gz", ".br"].map((suffix) =>
@@ -53,6 +60,38 @@ function centralIconPrunePlugin(): Plugin {
           ),
         );
       },
+    },
+  };
+}
+
+// Dev serves the outline icons straight from public/, so apply the stroke weight on the way
+// out; a build gets the same weight from the prune plugin above.
+function centralIconStrokeDevPlugin(): Plugin {
+  const prefix = `/${CENTRAL_OUTLINE_ICON_DIRECTORY}/`;
+  return {
+    name: "arbor-central-icon-stroke-dev",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const pathname = (request.url ?? "").split("?")[0] ?? "";
+        const name = pathname.startsWith(prefix) ? pathname.slice(prefix.length) : "";
+        // A bare icon file name only: nothing that could step outside the icon folder.
+        if (!/^[a-z0-9][a-z0-9-]*\.svg$/.test(name)) {
+          next();
+          return;
+        }
+        fs.readFile(
+          path.join(server.config.publicDir, CENTRAL_OUTLINE_ICON_DIRECTORY, name),
+          "utf8",
+        ).then(
+          (svg) => {
+            response.setHeader("Content-Type", "image/svg+xml");
+            response.setHeader("Cache-Control", "no-cache");
+            response.end(applyCentralIconStrokeWidth(svg));
+          },
+          () => next(),
+        );
+      });
     },
   };
 }
@@ -166,6 +205,7 @@ export default defineConfig({
     })),
     tailwindcss(),
     centralIconPrunePlugin(),
+    centralIconStrokeDevPlugin(),
     precompressPlugin(),
   ],
   optimizeDeps: {

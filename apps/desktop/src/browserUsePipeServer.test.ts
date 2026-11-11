@@ -63,6 +63,7 @@ async function withPipeServer(
     readonly maxInFlightRequests?: number;
     readonly maxQueuedOutputBytes?: number;
     readonly automationHost?: { executeTool: (request: unknown) => Promise<unknown> };
+    readonly requestGate?: Promise<unknown>;
   },
   run: (socket: Socket) => Promise<void>,
 ): Promise<void> {
@@ -78,6 +79,7 @@ async function withPipeServer(
       ? {}
       : { maxQueuedOutputBytes: options.maxQueuedOutputBytes }),
     ...(options.automationHost ? { automationHost: options.automationHost as never } : {}),
+    ...(options.requestGate ? { requestGate: options.requestGate } : {}),
   });
   await server.start();
   const socket = await connect(pipePath);
@@ -384,6 +386,77 @@ describe("canonical browser host RPC", () => {
         error: { message: "Too many in-flight browser host requests" },
       });
       expect(socket.destroyed).toBe(false);
+    });
+  });
+
+  it("holds requests until the request gate settles", async () => {
+    let openGate!: () => void;
+    const requestGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    await withPipeServer({ requestGate }, async (socket) => {
+      let answered = false;
+      const response = request(socket, { jsonrpc: "2.0", id: 1, method: "ping" }).then(
+        (message) => {
+          answered = true;
+          return message;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(answered).toBe(false);
+      openGate();
+      await expect(response).resolves.toMatchObject({ id: 1, result: "pong" });
+    });
+  });
+
+  it("opens the request gate when it rejects", async () => {
+    const requestGate = Promise.reject(new Error("restore failed"));
+    // Handled here so the test runner does not see it as unhandled before the server attaches.
+    requestGate.catch(() => {});
+    await withPipeServer({ requestGate }, async (socket) => {
+      await expect(
+        request(socket, { jsonrpc: "2.0", id: 1, method: "ping" }),
+      ).resolves.toMatchObject({ id: 1, result: "pong" });
+    });
+  });
+
+  it("drops a gated request whose client left before the gate opened", async () => {
+    let openGate!: () => void;
+    const requestGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const executeTool = vi.fn(async () => ({ ok: true }));
+    await withPipeServer({ requestGate, automationHost: { executeTool } }, async (socket) => {
+      // Without the abort check after the gate, getInfo would bind the session
+      // and executeTool would then run for a client that is already gone.
+      socket.write(
+        encodeRequest({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getInfo",
+          params: { session_id: "session-gated", capability: TEST_CAPABILITY },
+        }),
+      );
+      socket.write(
+        encodeRequest({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "executeTool",
+          params: {
+            session_id: "session-gated",
+            provider: "codex",
+            thread_id: "thread-1",
+            name: "browser_wait",
+            arguments: {},
+          },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      openGate();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(executeTool).not.toHaveBeenCalled();
     });
   });
 

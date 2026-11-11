@@ -5,7 +5,7 @@
 
 import { APP_ICON_TILE_SIZE_CLASSES, AppIconTile, ConnectorDots } from "~/components/AppIconTile";
 import { ProviderIcon } from "~/components/ProviderIcon";
-import { SynaraLogo } from "@synara/profile-ui/logo";
+import { ArborLogo } from "@synara/profile-ui/logo";
 import { cn } from "~/lib/utils";
 
 type GlyphSize = "md" | "lg";
@@ -44,7 +44,7 @@ export function ProjectImportGlyph(props: { size?: GlyphSize; className?: string
         dotClassNames={["bg-[#d97757]/45", "bg-[#d97757]/70", "bg-[#d97757]"]}
       />
       <AppIconTile size={size} glow="left" glowColor={NEUTRAL_GLOW} className="rotate-6">
-        <SynaraLogo className={classes.icon} />
+        <ArborLogo className={classes.icon} />
       </AppIconTile>
     </span>
   );
