@@ -26,6 +26,7 @@ import type { AgentGatewayMcpFetch } from "../../agentGateway/mcpInjection.ts";
 import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermission.ts";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { PiAdapter, type PiAdapterShape } from "../Services/PiAdapter.ts";
+import { isBatchableAssistantText } from "../providerRuntimeTextBatch.ts";
 import { makePiAdapterLive } from "./PiAdapter.ts";
 
 const captured = vi.hoisted(() => ({
@@ -1078,6 +1079,15 @@ it("closes failed message items before retrying with separate items", async () =
     );
     expect(completions(events)).toHaveLength(0);
     await waitFor(() => expect(completions(events)).toHaveLength(1));
+    // Durable text batching relies on fresh canonical ids and empty raw payloads.
+    expect(adapter.runtimeEventDelivery).toBe("fresh-ids-once");
+    const textDeltas = events.filter(
+      (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+    );
+    expect(textDeltas.length).toBeGreaterThan(0);
+    expect(textDeltas.every(isBatchableAssistantText)).toBe(true);
+    expect(textDeltas[0]?.raw?.source).toBe("pi.sdk.event");
+    expect(textDeltas[0]?.raw?.payload).toEqual({});
     for (const itemType of ["assistant_message", "reasoning"] as const) {
       const started = events.filter(
         (event) => event.type === "item.started" && event.payload.itemType === itemType,

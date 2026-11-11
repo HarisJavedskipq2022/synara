@@ -60,7 +60,6 @@ import {
   type ProjectDevServerEvent,
   type ProviderStartOptions,
   type OrchestrationShellStreamEvent,
-  type OrchestrationShellStreamItem,
   type ProjectId,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
@@ -73,7 +72,7 @@ import { clamp } from "effect/Number";
 import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Scope, Stream } from "effect";
 import * as Arr from "effect/Array";
 import { Headers, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { type RpcGroup, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import { createAccountSession } from "./accountSession";
 import { AutomationService } from "./automation/Services/AutomationService";
@@ -281,6 +280,12 @@ import {
   makeCursorSafeSnapshotLiveStream,
   makeResnapshotEscalationTracker,
 } from "./wsSnapshotLiveStream";
+import {
+  asDecodedShellSnapshot,
+  encodeShellSnapshotForWire,
+  type ShellStreamWireItem,
+  WsServerSubscribeShellRpc,
+} from "./wsShellSnapshotWire";
 import { PullRequestService } from "./pullRequests/Services/PullRequestService";
 import { PullRequestAutoFixService } from "./pullRequestAutoFix/Services/PullRequestAutoFixService";
 import {
@@ -310,11 +315,18 @@ const THREAD_DETAIL_SNAPSHOT_BOOTSTRAP_POLL_MS = 100;
 
 // Optional device, computer, and project-agent link groups are served on the
 // same socket: one connection, one admission middleware, one exhaustive
-// handler map.
-const AdmittedWsFeatureRpcGroup = WsFeatureRpcGroup.merge(WsDeviceRpcGroup)
+// handler map. subscribeShell is replaced by a server-side definition whose
+// snapshot member arrives pre-encoded (wsShellSnapshotWire.ts); same wire bytes.
+const AdmittedWsFeatureRpcGroup = WsFeatureRpcGroup.add(WsServerSubscribeShellRpc)
+  .merge(WsDeviceRpcGroup)
   .merge(WsComputerRpcGroup)
   .merge(WsProjectAgentRpcGroup)
   .middleware(WsRequestAdmissionMiddleware);
+/**
+ * The group the WebSocket RPC server serves, for wsShellSnapshotWire.rpc.test.ts.
+ * Typed loosely: the full inferred type is too large to export.
+ */
+export const admittedWsFeatureRpcGroupForTest: RpcGroup.RpcGroup<any> = AdmittedWsFeatureRpcGroup;
 
 // Relative subdirectories scaffolded under a freshly created chat container workspace root.
 // The Studio layout lives in studioWorkspaceScaffold.ts alongside its instruction files.
@@ -1780,11 +1792,12 @@ const makeWsRpcHandlersLayer = () =>
                 label: "orchestration.shell",
                 onDroppedEvents: () => Effect.void,
               },
-              snapshot: projectionReadModelQuery
-                .getShellSnapshot()
-                .pipe(
-                  Effect.mapError((cause) => toWsRpcError(cause, "Failed to load shell snapshot")),
-                ),
+              snapshot: projectionReadModelQuery.getShellSnapshot().pipe(
+                // getShellSnapshot returns decodeShellSnapshot output, the
+                // precondition of encodeShellSnapshotForWire.
+                Effect.map(asDecodedShellSnapshot),
+                Effect.mapError((cause) => toWsRpcError(cause, "Failed to load shell snapshot")),
+              ),
               snapshotSequence: (snapshot) => snapshot.snapshotSequence,
               getHighWaterSequence: getOrchestrationHighWaterSequence,
               replay: (fromSequenceExclusive, throughSequenceInclusive) =>
@@ -1799,16 +1812,21 @@ const makeWsRpcHandlersLayer = () =>
             }).pipe(
               Stream.mapEffect((item) =>
                 item.kind === "snapshot"
-                  ? Effect.succeed(
-                      Option.some<OrchestrationShellStreamItem>({
-                        kind: "snapshot",
-                        snapshot: item.snapshot,
-                      }),
-                    )
+                  ? // A typed failure ends only this request. A throw would die
+                    // the handler, and RpcServer turns a die into a
+                    // connection-level Defect that fails every request on the socket.
+                    Effect.try({
+                      try: () =>
+                        Option.some<ShellStreamWireItem>({
+                          kind: "snapshot",
+                          snapshot: encodeShellSnapshotForWire(item.snapshot),
+                        }),
+                      catch: (cause) => toWsRpcError(cause, "Failed to encode shell snapshot"),
+                    })
                   : item.kind === "event"
                     ? toShellStreamEvent(item.event)
                     : // The shell stream never opts into batched replay.
-                      Effect.succeed(Option.none<OrchestrationShellStreamItem>()),
+                      Effect.succeed(Option.none<ShellStreamWireItem>()),
               ),
               Stream.flatMap((item) =>
                 Option.isSome(item) ? Stream.succeed(item.value) : Stream.empty,

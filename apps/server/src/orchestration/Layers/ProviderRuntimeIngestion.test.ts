@@ -33,6 +33,7 @@ import {
   Effect,
   Deferred,
   Exit,
+  Fiber,
   Layer,
   ManagedRuntime,
   Option,
@@ -85,6 +86,7 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { runProviderRuntimeEventPump } from "../../provider/providerRuntimeEventPump.ts";
+import { makeAcpContentDeltaEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -352,6 +354,50 @@ function singleLineFileDiff(path: string): string {
     "",
   ].join("\n");
 }
+
+// What the client renders: message text, interleave segments, row order.
+const projection = (thread: OrchestrationThread | undefined) => ({
+  messages: thread?.messages
+    .filter((message) => message.role === "assistant")
+    .map((message) => ({
+      id: message.id,
+      text: message.text,
+      streaming: message.streaming,
+      turnId: message.turnId,
+      attachments: message.attachments,
+      segments: message.textSegments?.map((segment) => ({
+        text: segment.text,
+        startedAt: segment.startedAt,
+      })),
+    })),
+  activities: thread?.activities.map(
+    (activity) => [activity.kind, activity.summary, activity.payload] as const,
+  ),
+});
+
+// Journal order with adjacent same-stream text collapsed: batching may
+// only merge neighbours, never move text across another event.
+const journalShape = (rows: ReadonlyArray<PersistedProviderRuntimeEvent>) =>
+  rows.reduce<Array<[string, string]>>((shape, { event }) => {
+    const key =
+      event.type === "content.delta"
+        ? `delta:${event.itemId}:${event.payload.streamKind}`
+        : event.type;
+    const text = event.type === "content.delta" ? event.payload.delta : "";
+    const last = shape.at(-1);
+    if (last !== undefined && last[0] === key && key.startsWith("delta:")) last[1] += text;
+    else shape.push([key, text]);
+    return shape;
+  }, []);
+
+const REASONING_DETAIL = "Thinking hard, wéll 🤔";
+const reasoningDetailCount = (view: ReturnType<typeof projection>) =>
+  view.activities?.filter(
+    ([, , payload]) => (payload as { detail?: unknown } | null)?.detail === REASONING_DETAIL,
+  ).length ?? 0;
+
+const deltaRows = (rows: ReadonlyArray<PersistedProviderRuntimeEvent>) =>
+  rows.filter((row) => row.event.type === "content.delta");
 
 describe("ProviderRuntimeIngestion", () => {
   it("backs off idle journal safety polls and returns to the fast recovery cadence", () => {
@@ -1421,6 +1467,592 @@ describe("ProviderRuntimeIngestion", () => {
     },
     30_000,
   );
+
+  describe("text batching", () => {
+    type Harness = Awaited<ReturnType<typeof createHarness>>;
+    // Cursor stands for the ACP adapters; Codex and Claude batched answer text
+    // before reasoning text joined it.
+    const TEXT_PROVIDERS = ["cursor", "codex", "claudeAgent"] as const;
+    type TextProvider = (typeof TEXT_PROVIDERS)[number];
+    const BATCH_TURN = asTurnId("text-batch-turn");
+    const ANSWER_TEXT = "Héllo, wörld — first part.\nAfter the tool 🙂 ok. Done.";
+    const REASONING_TEXT = REASONING_DETAIL;
+
+    // Mirrors afterEach so one test can compare two independent databases.
+    async function disposeHarness() {
+      if (scope) await Effect.runPromise(Scope.close(scope, Exit.void));
+      scope = null;
+      if (runtime) await runtime.dispose();
+      runtime = null;
+    }
+
+    // One turn: answer text split by a reasoning item, a tool row, a warning,
+    // and a second message. `legacyRaw` reproduces ACP rows written before
+    // deltas dropped their session/update frame.
+    function textScenario(provider: TextProvider, legacyRaw: boolean): ProviderRuntimeEvent[] {
+      let tick = 0;
+      const stamp = () => {
+        tick += 1;
+        return {
+          eventId: asEventId(`text-batch-${tick}`),
+          createdAt: new Date(Date.parse("2026-11-11T00:00:00.000Z") + tick).toISOString(),
+        };
+      };
+      const base = { provider, threadId: asThreadId("thread-1"), turnId: BATCH_TURN };
+      const delta = (
+        itemId: string,
+        text: string,
+        streamKind: "assistant_text" | "reasoning_text" = "assistant_text",
+      ): ProviderRuntimeEvent => {
+        const reasoning = streamKind === "reasoning_text";
+        if (provider === "cursor") {
+          const event = makeAcpContentDeltaEvent({
+            stamp: stamp(),
+            ...base,
+            itemId,
+            text,
+            streamKind,
+          });
+          if (!legacyRaw) return event;
+          const sessionUpdate = reasoning ? "agent_thought_chunk" : "agent_message_chunk";
+          return {
+            ...event,
+            raw: {
+              source: "acp.jsonrpc",
+              method: "session/update",
+              payload: { sessionId: "acp-session", update: { sessionUpdate, content: { text } } },
+            },
+          };
+        }
+        return {
+          type: "content.delta",
+          ...stamp(),
+          ...base,
+          itemId: asItemId(itemId),
+          payload: {
+            streamKind,
+            delta: text,
+            ...(reasoning && provider === "codex" ? { contentIndex: 0 } : {}),
+          },
+          ...(provider === "codex"
+            ? {
+                raw: {
+                  source: "codex.app-server.notification" as const,
+                  method: reasoning ? "item/reasoning/textDelta" : "item/agentMessage/delta",
+                  payload: {},
+                },
+              }
+            : {}),
+        };
+      };
+      const tool = { itemType: "command_execution" as const, title: "Run tests" };
+      const thought = { itemType: "reasoning" as const, title: "Reasoning" };
+      return [
+        { ...base, ...stamp(), type: "turn.started", payload: {} },
+        delta("text-answer", "Hé"),
+        delta("text-answer", "llo, "),
+        delta("text-answer", "wörld"),
+        {
+          ...base,
+          ...stamp(),
+          type: "item.started",
+          itemId: asItemId("text-thought"),
+          payload: { ...thought, status: "inProgress" },
+        },
+        delta("text-thought", "Thinking ", "reasoning_text"),
+        delta("text-thought", "hard, ", "reasoning_text"),
+        delta("text-thought", "wéll 🤔", "reasoning_text"),
+        {
+          ...base,
+          ...stamp(),
+          type: "item.completed",
+          itemId: asItemId("text-thought"),
+          // Codex completes reasoning with its own text; Claude's comes from the deltas.
+          payload: {
+            ...thought,
+            status: "completed",
+            ...(provider === "codex" ? { detail: REASONING_TEXT } : {}),
+          },
+        },
+        delta("text-answer", " — first "),
+        delta("text-answer", "part.\n"),
+        {
+          ...base,
+          ...stamp(),
+          type: "item.started",
+          itemId: asItemId("text-tool"),
+          payload: { ...tool, status: "inProgress" },
+        },
+        {
+          ...base,
+          ...stamp(),
+          type: "item.completed",
+          itemId: asItemId("text-tool"),
+          payload: { ...tool, status: "completed" },
+        },
+        delta("text-answer", "After "),
+        delta("text-answer", "the tool 🙂"),
+        delta("text-answer", " ok."),
+        { ...base, ...stamp(), type: "runtime.warning", payload: { message: "Slow provider" } },
+        delta("text-answer", " Done"),
+        delta("text-answer", "."),
+        delta("text-second", "Second "),
+        delta("text-second", "message"),
+        { ...base, ...stamp(), type: "turn.completed", payload: { state: "completed" } },
+      ];
+    }
+
+    async function pumpIntoJournal(
+      harness: Harness,
+      events: ReadonlyArray<ProviderRuntimeEvent>,
+      batchAssistantText: boolean,
+    ): Promise<PersistedProviderRuntimeEvent[]> {
+      const accepted: PersistedProviderRuntimeEvent[] = [];
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const admitted = yield* Deferred.make<void>();
+          const fiber = yield* runProviderRuntimeEventPump({
+            provider: "cursor",
+            batchAssistantText,
+            // The pump pulls the signal only after accepting every event. The
+            // stream then stays open, as an adapter stream does.
+            stream: Stream.concat(
+              Stream.fromIterable(events),
+              Stream.fromEffect(Deferred.succeed(admitted, undefined)).pipe(
+                Stream.drain,
+                Stream.concat(Stream.never),
+              ),
+            ),
+            processEvent: (event) =>
+              harness.runtimeEventRepository.append(event).pipe(
+                Effect.tap((persisted) => Effect.sync(() => accepted.push(persisted))),
+                Effect.asVoid,
+              ),
+            updateHealth: () => {},
+          }).pipe(Effect.forkDetach);
+          yield* Deferred.await(admitted);
+          // Graceful shutdown flushes text still inside the batch window.
+          yield* Fiber.interrupt(fiber);
+        }),
+      );
+      return accepted;
+    }
+
+    const appendAll = (harness: Harness, events: ReadonlyArray<ProviderRuntimeEvent>) =>
+      Effect.runPromise(
+        Effect.forEach(events, (event) => harness.runtimeEventRepository.append(event)),
+      );
+
+    // Ingestion keeps no ACP reasoning_text: for Cursor the reasoning check is
+    // the journal shape alone. Codex and Claude also project a reasoning row.
+    it.each([
+      ["cursor", "the journal only"],
+      ["codex", "the journal and its projected reasoning row"],
+      ["claudeAgent", "the journal and its projected reasoning row"],
+    ] as const)(
+      "keeps %s answer text, segments and row order identical with and without batching; reasoning compared in %s",
+      async (provider, _reasoningComparedIn) => {
+        const unbatchedHarness = await createHarness({
+          startIngestion: false,
+          persistedStream: true,
+        });
+        const scenario = textScenario(provider, false);
+        const unbatchedRows = await pumpIntoJournal(unbatchedHarness, scenario, false);
+        await unbatchedHarness.drain();
+        const unbatched = projection(await unbatchedHarness.readProjectedThread());
+        await disposeHarness();
+
+        const batchedHarness = await createHarness({
+          startIngestion: false,
+          persistedStream: true,
+        });
+        const batchedRows = await pumpIntoJournal(batchedHarness, scenario, true);
+        await batchedHarness.drain();
+        const batched = projection(await batchedHarness.readProjectedThread());
+
+        expect(deltaRows(unbatchedRows)).toHaveLength(15);
+        // Four answer runs split by reasoning, a tool row and a warning, one
+        // reasoning run and a second message. The 25 ms window may split a
+        // run under load, never merge two.
+        expect(deltaRows(batchedRows).length).toBeLessThanOrEqual(6);
+        expect(journalShape(batchedRows)).toEqual(journalShape(unbatchedRows));
+        expect(
+          journalShape(batchedRows).find(([key]) => key === "delta:text-thought:reasoning_text"),
+        ).toEqual(["delta:text-thought:reasoning_text", REASONING_TEXT]);
+        expect(batched).toEqual(unbatched);
+        expect(batched.messages).toEqual([
+          {
+            id: "assistant:text-answer",
+            text: ANSWER_TEXT,
+            streaming: false,
+            turnId: BATCH_TURN,
+            segments: [
+              { text: "Héllo, wörld — first part.\n", startedAt: "2026-11-11T00:00:00.002Z" },
+              { text: "After the tool 🙂 ok.", startedAt: "2026-11-11T00:00:00.014Z" },
+              { text: " Done.", startedAt: "2026-11-11T00:00:00.018Z" },
+            ],
+          },
+          expect.objectContaining({ id: "assistant:text-second", text: "Second message" }),
+        ]);
+        expect(Buffer.from(batched.messages![0]!.text)).toEqual(Buffer.from(ANSWER_TEXT));
+        if (provider === "cursor") {
+          expect(reasoningDetailCount(unbatched)).toBe(0);
+          expect(reasoningDetailCount(batched)).toBe(0);
+        } else {
+          // Codex completes the row with its own text; Claude's comes from the deltas.
+          expect(reasoningDetailCount(unbatched)).toBe(1);
+          expect(reasoningDetailCount(batched)).toBe(1);
+        }
+      },
+    );
+
+    it.each(TEXT_PROVIDERS)(
+      "replays a per-delta %s journal from before batching and continues it with batched rows",
+      async (provider) => {
+        const legacy = textScenario(provider, true);
+        const control = await createHarness({ startIngestion: false, persistedStream: true });
+        await appendAll(control, legacy);
+        await control.drain();
+        const expected = projection(await control.readProjectedThread());
+        expect(expected.messages?.[0]?.text).toBe(ANSWER_TEXT);
+        await disposeHarness();
+
+        // The old process journaled up to the tool one row per delta, reasoning
+        // included, then died before acknowledging its last page.
+        const harness = await createHarness({ startIngestion: false, persistedStream: true });
+        const toolIndex = legacy.findIndex(
+          (event) => event.type === "item.started" && event.itemId === "text-tool",
+        );
+        const oldRows = await appendAll(harness, legacy.slice(0, toolIndex));
+        await harness.drain();
+        const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+        await runtime!.runPromise(sql`
+          UPDATE provider_runtime_event_consumers
+          SET last_acked_sequence = ${oldRows[2]!.sequence}
+          WHERE consumer_name = ${PROVIDER_RUNTIME_INGESTION_CONSUMER}
+        `);
+        await Effect.runPromise(Scope.close(scope!, Exit.void));
+
+        // The new process replays the unacknowledged legacy rows, the adapter
+        // re-delivers events the journal already holds, and the rest of the
+        // turn arrives through the batching pump.
+        const restartedDrain = await harness.restartIngestion();
+        const redelivered = await appendAll(harness, legacy.slice(0, toolIndex));
+        expect(redelivered.map((row) => row.sequence)).toEqual(oldRows.map((row) => row.sequence));
+        const newRows = await pumpIntoJournal(
+          harness,
+          textScenario(provider, false).slice(toolIndex),
+          true,
+        );
+        expect(deltaRows(newRows).length).toBeLessThan(
+          legacy.slice(toolIndex).filter((event) => event.type === "content.delta").length,
+        );
+        await restartedDrain();
+
+        expect(projection(await harness.readProjectedThread())).toEqual(expected);
+        expect(
+          await Effect.runPromise(
+            harness.runtimeEventRepository.getConsumerCursor(PROVIDER_RUNTIME_INGESTION_CONSUMER),
+          ),
+        ).toBe(await Effect.runPromise(harness.runtimeEventRepository.getHighWaterSequence));
+      },
+    );
+
+    it.each(TEXT_PROVIDERS)(
+      "does not duplicate batched %s text when ingestion replays an unacknowledged page of a still-open turn",
+      async (provider) => {
+        const harness = await createHarness({ startIngestion: false, persistedStream: true });
+        const events = textScenario(provider, false);
+        // Everything but turn.completed: the turn is still open when it replays.
+        const rows = await pumpIntoJournal(harness, events.slice(0, -1), true);
+        await harness.drain();
+        const before = projection(await harness.readProjectedThread());
+        expect(before.messages?.map((message) => message.text)).toEqual([
+          ANSWER_TEXT,
+          "Second message",
+        ]);
+
+        // Lose the acknowledgement of every batched row after turn start.
+        const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+        await runtime!.runPromise(sql`
+          UPDATE provider_runtime_event_consumers
+          SET last_acked_sequence = ${rows[0]!.sequence}
+          WHERE consumer_name = ${PROVIDER_RUNTIME_INGESTION_CONSUMER}
+        `);
+        await Effect.runPromise(Scope.close(scope!, Exit.void));
+        const restartedDrain = await harness.restartIngestion();
+        await restartedDrain();
+        expect(projection(await harness.readProjectedThread())).toEqual(before);
+
+        await pumpIntoJournal(harness, events.slice(-1), true);
+        await restartedDrain();
+        const settled = projection(await harness.readProjectedThread());
+        expect(settled.messages?.map((message) => [message.text, message.streaming])).toEqual([
+          [ANSWER_TEXT, false],
+          ["Second message", false],
+        ]);
+        const details = settled.activities?.map(
+          ([, , payload]) => (payload as { detail?: unknown } | null)?.detail,
+        );
+        expect(details?.filter((detail) => detail === REASONING_TEXT)).toHaveLength(
+          provider === "cursor" ? 0 : 1,
+        );
+      },
+    );
+
+    const JOURNAL_KINDS = ["legacy", "unbatched", "batched"] as const;
+    type JournalKind = (typeof JOURNAL_KINDS)[number];
+
+    // Legacy rows are appended one per delta, as the code before batching did.
+    const writeJournal = (
+      harness: Harness,
+      events: ReadonlyArray<ProviderRuntimeEvent>,
+      kind: JournalKind,
+    ) =>
+      kind === "legacy"
+        ? appendAll(harness, events)
+        : pumpIntoJournal(harness, events, kind === "batched");
+
+    // A crash after a page's commands committed and before its acknowledgement:
+    // the restarted ingestion replays every row after `sequence`.
+    async function replayAfterLostAcknowledgement(harness: Harness, sequence: number) {
+      const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+      await runtime!.runPromise(sql`
+        UPDATE provider_runtime_event_consumers
+        SET last_acked_sequence = ${sequence}
+        WHERE consumer_name = ${PROVIDER_RUNTIME_INGESTION_CONSUMER}
+      `);
+      await Effect.runPromise(Scope.close(scope!, Exit.void));
+      const restartedDrain = await harness.restartIngestion();
+      await restartedDrain();
+    }
+
+    // Late text in the adapter's own delta shape, after the turn completed.
+    const lateDelta = (
+      scenario: ReadonlyArray<ProviderRuntimeEvent>,
+      eventId: string,
+      itemId: string,
+      delta: string,
+    ): ProviderRuntimeEvent => {
+      const template = scenario.find(
+        (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+      );
+      if (template?.type !== "content.delta") throw new Error("Expected an answer delta");
+      return {
+        ...template,
+        eventId: asEventId(eventId),
+        createdAt: "2026-11-11T00:00:01.000Z",
+        itemId: asItemId(itemId),
+        payload: { ...template.payload, delta },
+      };
+    };
+
+    it.each(
+      TEXT_PROVIDERS.flatMap((provider) => JOURNAL_KINDS.map((kind) => [provider, kind] as const)),
+    )(
+      "replays a completed %s turn from a %s journal after a lost acknowledgement without duplicating it",
+      async (provider, kind) => {
+        const harness = await createHarness({ startIngestion: false, persistedStream: true });
+        const rows = await writeJournal(harness, textScenario(provider, kind === "legacy"), kind);
+        await harness.drain();
+        const before = projection(await harness.readProjectedThread());
+        expect(before.messages?.map((message) => [message.text, message.streaming])).toEqual([
+          [ANSWER_TEXT, false],
+          ["Second message", false],
+        ]);
+
+        // The page holding turn.completed replays after the turn is finalized.
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        const after = projection(await harness.readProjectedThread());
+        // Messages, segments, tool and warning rows, and reasoning rows.
+        expect(after).toEqual(before);
+        expect(reasoningDetailCount(after)).toBe(provider === "cursor" ? 0 : 1);
+      },
+    );
+
+    it.each(TEXT_PROVIDERS)(
+      "applies genuinely late %s text once, also when its unacknowledged page replays",
+      async (provider) => {
+        const harness = await createHarness({ startIngestion: false, persistedStream: true });
+        const scenario = textScenario(provider, false);
+        const rows = await pumpIntoJournal(harness, scenario, true);
+        await harness.drain();
+
+        // Late text for the answer and a new item arrives after turn.completed.
+        // The crash comes before it is ingested: the replayed page is applied
+        // up to turn.completed and not after.
+        await appendAll(harness, [
+          lateDelta(scenario, "text-late-answer", "text-answer", " Late."),
+          lateDelta(scenario, "text-late-item", "text-late", "Late item"),
+        ]);
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        const once = projection(await harness.readProjectedThread());
+        expect(
+          once.messages?.map((message) => [message.id, message.text, message.streaming]),
+        ).toEqual([
+          ["assistant:text-answer", `${ANSWER_TEXT} Late.`, false],
+          ["assistant:text-second", "Second message", false],
+          ["assistant:text-late", "Late item", false],
+        ]);
+
+        // Replaying the late rows themselves dedupes on their late command ids.
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        expect(projection(await harness.readProjectedThread())).toEqual(once);
+      },
+    );
+
+    it.each(TEXT_PROVIDERS)(
+      "applies a first late %s delta once although a later row settles another message",
+      async (provider) => {
+        const harness = await createHarness({ startIngestion: false, persistedStream: true });
+        const scenario = textScenario(provider, false);
+        const rows = await pumpIntoJournal(harness, scenario, true);
+        await harness.drain();
+        const template = scenario.find((event) => event.type === "item.completed")!;
+
+        // Late text for message A, then a row of the same turn that settles
+        // message B. Neither was ingested before the crash.
+        await appendAll(harness, [
+          lateDelta(scenario, "text-late-a", "text-late-a", "Late A"),
+          {
+            ...template,
+            type: "item.completed",
+            eventId: asEventId("text-late-b-completed"),
+            createdAt: "2026-11-11T00:00:01.500Z",
+            itemId: asItemId("text-second"),
+            payload: { itemType: "assistant_message", status: "completed" },
+          },
+        ]);
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        const once = projection(await harness.readProjectedThread());
+        expect(
+          once.messages?.map((message) => [message.id, message.text, message.streaming]),
+        ).toEqual([
+          ["assistant:text-answer", ANSWER_TEXT, false],
+          ["assistant:text-second", "Second message", false],
+          ["assistant:text-late-a", "Late A", false],
+        ]);
+
+        // B's settle receipt now exists; it must not stand in for A either way.
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        expect(projection(await harness.readProjectedThread())).toEqual(once);
+      },
+    );
+
+    it("applies a late delta although a later row of its thread cannot be decoded", async () => {
+      const harness = await createHarness({ startIngestion: false, persistedStream: true });
+      const scenario = textScenario("codex", false);
+      const rows = await pumpIntoJournal(harness, scenario, true);
+      await harness.drain();
+      const [late] = await appendAll(harness, [
+        lateDelta(scenario, "text-late-undecodable", "text-answer", " Late."),
+      ]);
+      // Push the bad row past the replayed page so the late delta is processed
+      // first, then add a terminal row of the same turn this version cannot read.
+      const filler = scenario.find((event) => event.type === "runtime.warning")!;
+      await appendAll(
+        harness,
+        Array.from({ length: 140 }, (_, index) => ({
+          ...filler,
+          eventId: asEventId(`text-undecodable-filler-${index}`),
+          turnId: asTurnId("text-undecodable-other-turn"),
+        })),
+      );
+      const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+      await runtime!.runPromise(sql`
+        INSERT INTO provider_runtime_events (
+          event_id, thread_id, turn_id, lifecycle_generation, event_type, event_json, persisted_at
+        ) VALUES (
+          'text-undecodable-terminal', 'thread-1', ${BATCH_TURN}, NULL, 'turn.completed',
+          '{"type":"turn.completed","payload":"from another version"}', '2026-11-11T00:00:03.000Z'
+        )
+      `);
+      const badRow = await runtime!.runPromise(
+        sql<{
+          sequence: number;
+        }>`SELECT sequence FROM provider_runtime_events WHERE event_id = 'text-undecodable-terminal'`,
+      );
+
+      // The page read that reaches the bad row fails exactly as before: the
+      // restarted drain stops there, after the late delta was applied.
+      await expect(replayAfterLostAcknowledgement(harness, rows[0]!.sequence)).rejects.toThrow();
+      expect((await projectedMessage(harness, "assistant:text-answer"))?.text).toBe(
+        `${ANSWER_TEXT} Late.`,
+      );
+      const cursor = await Effect.runPromise(
+        harness.runtimeEventRepository.getConsumerCursor(PROVIDER_RUNTIME_INGESTION_CONSUMER),
+      );
+      expect(cursor).toBeGreaterThanOrEqual(late!.sequence);
+      expect(cursor).toBeLessThan(badRow[0]!.sequence);
+    });
+
+    it.each(["cursor", "codex"] as const)(
+      "replays a buffered %s turn and its held late text without duplicating them",
+      async (provider) => {
+        const harness = await createHarness({ persistedStream: true });
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe(`cmd-turn-start-buffered-replay-${provider}`),
+            threadId: asThreadId("thread-1"),
+            message: {
+              messageId: asMessageId(`message-buffered-replay-${provider}`),
+              role: "user",
+              text: "hold the answer",
+              attachments: [],
+            },
+            assistantDeliveryMode: "buffered",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await harness.drain();
+        const scenario = textScenario(provider, false);
+        const terminalIndex = scenario.length - 1;
+        const rows = await pumpIntoJournal(harness, scenario.slice(0, terminalIndex), true);
+        await harness.drain();
+        // Buffered: nothing streams before the turn ends.
+        expect(
+          (await harness.readProjectedThread())?.messages.filter((m) => m.role === "assistant"),
+        ).toEqual([]);
+        await pumpIntoJournal(harness, scenario.slice(terminalIndex), true);
+        await harness.drain();
+        expect((await projectedMessage(harness, "assistant:text-answer"))?.text).toBe(ANSWER_TEXT);
+
+        // Late text of the ended buffered turn is held, then settled when the
+        // next turn starts.
+        await appendAll(harness, [
+          lateDelta(scenario, "text-buffered-late", "text-answer", " Late."),
+        ]);
+        await harness.drain();
+        expect((await projectedMessage(harness, "assistant:text-answer"))?.text).toBe(ANSWER_TEXT);
+        await appendAll(harness, [
+          {
+            type: "turn.started",
+            eventId: asEventId("text-buffered-next-turn"),
+            provider,
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("text-buffered-next"),
+            createdAt: "2026-11-11T00:00:02.000Z",
+            payload: {},
+          },
+        ]);
+        await harness.drain();
+        const before = projection(await harness.readProjectedThread());
+        expect(
+          before.messages?.map((message) => [message.id, message.text, message.streaming]),
+        ).toEqual([
+          ["assistant:text-answer", `${ANSWER_TEXT} Late.`, false],
+          ["assistant:text-second", "Second message", false],
+        ]);
+
+        // The restarted process no longer knows the turn was buffered.
+        await replayAfterLostAcknowledgement(harness, rows[0]!.sequence);
+        expect(projection(await harness.readProjectedThread())).toEqual(before);
+      },
+    );
+  });
 
   it.each(["replay", "live"] as const)(
     "preserves workflow phase agents and poll snapshots during %s ingestion",

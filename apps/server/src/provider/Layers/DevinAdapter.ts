@@ -3592,7 +3592,6 @@ export function makeDevinAdapter(
                             ctx,
                             subagentContext?.parentAgentId,
                           ),
-                          rawPayload: event.rawPayload,
                         }),
                       );
                     }
@@ -5048,6 +5047,8 @@ export function makeDevinAdapter(
       hasSession,
       stopAll,
       streamEvents,
+      // makeEventStamp mints a fresh local UUID; PubSub subscribers get no replay.
+      runtimeEventDelivery: "fresh-ids-once",
     } satisfies DevinAdapterShape;
   });
 }

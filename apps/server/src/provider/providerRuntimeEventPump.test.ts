@@ -14,6 +14,7 @@ import {
   makeProviderRuntimeEventPumpHealthRegistry,
   runProviderRuntimeEventPump,
 } from "./providerRuntimeEventPump.ts";
+import { withMinimalTextDeltaRaw } from "./providerRuntimeTextBatch.ts";
 
 const THREAD_ID = ThreadId.makeUnsafe("thread-runtime-pump");
 const TURN_ID = TurnId.makeUnsafe("turn-runtime-pump");
@@ -211,6 +212,72 @@ describe("providerRuntimeEventPump assistant text batching", () => {
       expect(await processTextBurst([first, second])).toEqual([first, second]);
     },
   );
+
+  it("accepts contiguous reasoning text as one event, apart from answer text", async () => {
+    const reasoning = (eventId: string, delta: string, contentIndex: number) =>
+      ({
+        ...textEvent(eventId, delta),
+        payload: { streamKind: "reasoning_text", delta, contentIndex },
+      }) satisfies TextEvent;
+    const first = reasoning("reasoning-first", "Thin", 0);
+    const nextIndex = reasoning("reasoning-next-index", "Then", 1);
+    const answer = textEvent("reasoning-answer", "Done");
+    expect(
+      await processTextBurst([
+        first,
+        reasoning("reasoning-second", "king 🤔", 0),
+        nextIndex,
+        answer,
+      ]),
+    ).toEqual([
+      {
+        ...first,
+        payload: { streamKind: "reasoning_text", delta: "Thinking 🤔", contentIndex: 0 },
+      },
+      nextIndex,
+      answer,
+    ]);
+  });
+
+  it("keeps summaries, plans and tool output as separate events", async () => {
+    const kinds = ["reasoning_summary_text", "plan_text", "command_output"] as const;
+    for (const streamKind of kinds) {
+      const first = { ...textEvent(`${streamKind}-1`, "A"), payload: { streamKind, delta: "A" } };
+      const second = { ...first, eventId: EventId.makeUnsafe(`${streamKind}-2`) };
+      expect(await processTextBurst([first, second])).toEqual([first, second]);
+    }
+  });
+
+  it("drops only text-delta raw payloads so their deltas can batch", async () => {
+    const withFrame = (eventId: string, delta: string) => ({
+      ...textEvent(eventId, delta),
+      raw: {
+        source: "pi.sdk.event" as const,
+        messageType: "message_update",
+        payload: { message: { content: [{ type: "text", text: delta }] } },
+      },
+    });
+    const first = withMinimalTextDeltaRaw(withFrame("minimal-first", "A"));
+    const second = withMinimalTextDeltaRaw(withFrame("minimal-second", "B"));
+    expect(first.raw).toEqual({
+      source: "pi.sdk.event",
+      messageType: "message_update",
+      payload: {},
+    });
+    expect(await processTextBurst([first, second])).toEqual([
+      { ...first, payload: { streamKind: "assistant_text", delta: "AB" } },
+    ]);
+
+    const minimal = textEvent("minimal-already", "A");
+    expect(withMinimalTextDeltaRaw(minimal)).toBe(minimal);
+    const output = {
+      ...withFrame("minimal-output", "ls"),
+      payload: { streamKind: "command_output" as const, delta: "ls" },
+    };
+    expect(withMinimalTextDeltaRaw(output)).toBe(output);
+    const completed = completedEvent("minimal-terminal");
+    expect(withMinimalTextDeltaRaw(completed)).toBe(completed);
+  });
 
   it("preserves opaque raw payload objects without enumerable keys", async () => {
     const first = {

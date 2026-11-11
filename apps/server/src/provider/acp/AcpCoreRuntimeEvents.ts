@@ -248,7 +248,6 @@ export function makeAcpContentDeltaEvent(input: {
   readonly text: string;
   readonly streamKind?: AcpTextStreamKind;
   readonly providerRefs?: ProviderRuntimeEvent["providerRefs"];
-  readonly rawPayload: unknown;
 }): ProviderRuntimeEvent {
   return {
     type: "content.delta",
@@ -262,10 +261,12 @@ export function makeAcpContentDeltaEvent(input: {
       streamKind: input.streamKind ?? "assistant_text",
       delta: input.text,
     },
+    // Callers write the session/update frame, which repeats the text, to the
+    // native log. An empty payload keeps the delta eligible for text batching.
     raw: {
       source: "acp.jsonrpc",
       method: "session/update",
-      payload: input.rawPayload,
+      payload: {},
     },
   };
 }

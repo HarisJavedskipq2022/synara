@@ -112,11 +112,13 @@ remain visible when the provider supplies no turn ID. Routine approved Guardian 
 quiet, and credential values in warning messages and details are redacted before storage.
 These warnings do not fail the session or create operational diagnostic incidents.
 
-Runtime events are journaled before live subscribers receive them. Codex and Claude can combine
-contiguous assistant-text deltas into one durable event, with a 25 ms admission window, at most
-32 KiB of UTF-8 text and 256 source events. A different thread, turn, item, stream kind, or
-metadata ends the batch. Tools, reasoning, terminal events and errors flush preceding text
-immediately. Native interruption and session teardown begin before waiting for text persistence.
+Runtime events are journaled before live subscribers receive them. Codex, Claude, Cursor, Devin,
+Grok, Droid, OMP, Pi and OpenCode can combine contiguous assistant-text or reasoning-text deltas
+into one durable event, with a 25 ms admission window, at most 32 KiB of UTF-8 text and 256
+source events. A different thread, turn, item, stream kind, content or summary index, or
+metadata ends the batch, so answer and reasoning text never share an event. Tools, reasoning
+summaries, plans, terminal events and errors flush preceding text immediately. Native
+interruption and session teardown begin before waiting for text persistence.
 Session teardown and the text drain run concurrently under the old lifecycle generation;
 retirement waits for both, and a teardown failure preserves that generation and the accepted text.
 Stop, session replacement and graceful shutdown flush before retiring the text's owner.
@@ -128,12 +130,16 @@ retryable or explicitly uncertain rather than being acknowledged as a successful
 If the initial target cannot be saved, Stop is rejected before any adapter call; a new explicit
 Stop may observe the current target. Interrupt-only controls for steer and goal fences preserve
 queued messages and transcript bootstrap when finishing the same receipt after a retry.
-Unknown metadata or nonempty raw payloads retain their original events.
+Unknown metadata or nonempty raw payloads retain their original events. The ACP adapters, Pi and
+OpenCode therefore store answer and reasoning deltas with an empty raw payload; the native
+event log keeps the provider frame when native logging is on.
 
 This optimization requires the adapter's explicit `fresh-ids-once` delivery guarantee: each
 canonical event gets a fresh local ID and comes from an owned destructive queue. Reconnection
 and resubscription never redeliver consumed canonical IDs. Codex mints those IDs around native
-notifications; Claude mints them with each event stamp. Other adapters keep each original ID.
+notifications; Claude, Cursor, Devin, Grok, Droid and OMP mint them with each event stamp; Pi and
+OpenCode mint them when building each event. Antigravity is left out: it emits each transcript
+step as a single delta between its item start and completion, so there is nothing to combine.
 A batch retains its first canonical ID and timestamp, and retries exactly the same content
 after an uncertain commit. Recovery reads the accepted journal rows with the existing ordered
 consumer cursor; a batch is never published before acceptance. Abrupt process death can lose

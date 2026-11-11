@@ -11,6 +11,7 @@ import {
   stampAcpRuntimeEventLifecycleGeneration,
 } from "./AcpCoreRuntimeEvents.ts";
 import { mergeToolCallState, parseSessionUpdateEvent } from "./AcpRuntimeModel.ts";
+import { compatibleAssistantText, isBatchableAssistantText } from "../providerRuntimeTextBatch.ts";
 
 describe("AcpCoreRuntimeEvents", () => {
   it.each(["cursor", "droid", "grok", "devin"] as const)(
@@ -83,7 +84,6 @@ describe("AcpCoreRuntimeEvents", () => {
       threadId: "thread-generation" as never,
       turnId: TurnId.makeUnsafe("turn-generation"),
       text: "hello",
-      rawPayload: { sessionId: "session-generation" },
     });
 
     expect(stampAcpRuntimeEventLifecycleGeneration(event, undefined)).toBe(event);
@@ -92,6 +92,26 @@ describe("AcpCoreRuntimeEvents", () => {
       lifecycleGeneration: "generation-7",
     });
     expect(event).not.toHaveProperty("lifecycleGeneration");
+  });
+
+  it("builds text deltas that the durable text batch can combine", () => {
+    const delta = (eventId: string, text: string) =>
+      stampAcpRuntimeEventLifecycleGeneration(
+        makeAcpContentDeltaEvent({
+          stamp: { eventId: eventId as never, createdAt: "2026-11-11T00:00:00.000Z" },
+          provider: "devin",
+          threadId: "thread-batch" as never,
+          turnId: TurnId.makeUnsafe("turn-batch"),
+          itemId: "assistant:turn-batch:item",
+          text,
+          providerRefs: { providerThreadId: "agent-1", providerParentThreadId: "session-1" },
+        }),
+        "generation-1",
+      );
+    const first = delta("event-batch-1", "Hel");
+    expect(first.raw).toEqual({ source: "acp.jsonrpc", method: "session/update", payload: {} });
+    if (!isBatchableAssistantText(first)) throw new Error("Expected a batchable ACP delta");
+    expect(compatibleAssistantText(first, delta("event-batch-2", "lo"))).toBe(true);
   });
 
   it("maps ACP permission requests to canonical runtime events", () => {
@@ -305,7 +325,6 @@ describe("AcpCoreRuntimeEvents", () => {
         turnId,
         itemId: "assistant:session-1:segment:0",
         text: "hello",
-        rawPayload: { sessionId: "session-1" },
       }),
     ).toMatchObject({
       type: "content.delta",
@@ -324,7 +343,6 @@ describe("AcpCoreRuntimeEvents", () => {
         turnId,
         text: "thinking",
         streamKind: "reasoning_text",
-        rawPayload: { sessionId: "session-1" },
       }),
     ).toMatchObject({
       type: "content.delta",

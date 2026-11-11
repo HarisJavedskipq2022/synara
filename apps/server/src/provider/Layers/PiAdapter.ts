@@ -102,6 +102,7 @@ import {
   PROVIDER_RUNTIME_CALLBACK_TERMINAL_RESERVE,
   type SizedProviderRuntimeEvent,
 } from "../providerRuntimeEventIngress.ts";
+import { withMinimalTextDeltaRaw } from "../providerRuntimeTextBatch.ts";
 import { clampUsagePercent, nonNegativeFiniteNumber, positiveFiniteNumber } from "../tokenUsage.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
@@ -2058,7 +2059,12 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         (nativeEventLogger && item.event.raw
           ? nativeEventLogger.write(item.event.raw, item.event.threadId).pipe(Effect.ignore)
           : Effect.void
-        ).pipe(Effect.andThen(Queue.offer(runtimeEventQueue, item.event)), Effect.asVoid),
+        ).pipe(
+          // The native log above keeps the full SDK event; the canonical text
+          // delta drops its copy so it can batch.
+          Effect.andThen(Queue.offer(runtimeEventQueue, withMinimalTextDeltaRaw(item.event))),
+          Effect.asVoid,
+        ),
       {
         capacity: PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
         maxBufferedBytes: PROVIDER_RUNTIME_CALLBACK_BUFFER_MAX_BYTES,
@@ -4276,6 +4282,8 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       get streamEvents() {
         return Stream.fromQueue(runtimeEventQueue);
       },
+      // makePiRuntimeEventBase mints a fresh local UUID; this queue has no replay.
+      runtimeEventDelivery: "fresh-ids-once",
     } satisfies PiAdapterShape;
   });
 

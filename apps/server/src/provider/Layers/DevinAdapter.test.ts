@@ -37,6 +37,7 @@ import {
   type AgentGatewayCredentialsShape,
 } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import { DevinAdapter } from "../Services/DevinAdapter.ts";
+import { isBatchableAssistantText } from "../providerRuntimeTextBatch.ts";
 import {
   applyDevinSessionConfiguration,
   buildDevinPromptMeta,
@@ -1054,6 +1055,14 @@ describe("Devin adapter lifecycle", () => {
             },
           }),
         );
+        // Durable text batching relies on fresh canonical ids and empty raw payloads.
+        expect(adapter.runtimeEventDelivery).toBe("fresh-ids-once");
+        const textDeltas = events.filter(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+        );
+        expect(textDeltas.length).toBeGreaterThan(0);
+        expect(textDeltas.every(isBatchableAssistantText)).toBe(true);
         expect(
           events.filter((event) => event.type === "task.completed").map((event) => event.payload),
         ).toEqual(

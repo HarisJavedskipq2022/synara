@@ -1271,7 +1271,6 @@ export function makeDroidAdapter(
                           ...(scopedItemId ? { itemId: scopedItemId } : {}),
                           text: event.text,
                           ...(event.streamKind ? { streamKind: event.streamKind } : {}),
-                          rawPayload: event.rawPayload,
                         }),
                       );
                     }
@@ -2290,6 +2289,8 @@ export function makeDroidAdapter(
       hasSession,
       stopAll,
       streamEvents,
+      // makeEventStamp mints a fresh local UUID; PubSub subscribers get no replay.
+      runtimeEventDelivery: "fresh-ids-once",
     } satisfies DroidAdapterShape;
   });
 }

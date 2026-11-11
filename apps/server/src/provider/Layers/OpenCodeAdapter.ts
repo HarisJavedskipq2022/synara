@@ -7,6 +7,7 @@ import {
   type OpenCodeMessageState,
   OpenCodePartIndex,
 } from "../openCodeMessageState.ts";
+import { withMinimalTextDeltaRaw } from "../providerRuntimeTextBatch.ts";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -1481,9 +1482,10 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
         }),
       );
 
+      // The SDK event behind a text delta is already in the native log.
       const emit = (context: OpenCodeSessionContext, event: ProviderRuntimeEvent) =>
         Queue.offer(runtimeEvents, {
-          ...event,
+          ...withMinimalTextDeltaRaw(event),
           ...(context.session.providerInstanceId &&
           event.providerInstanceId !== context.session.providerInstanceId
             ? { providerInstanceId: context.session.providerInstanceId }
@@ -5217,6 +5219,8 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
         get streamEvents() {
           return Stream.fromQueue(runtimeEvents);
         },
+        // buildEventBase mints a fresh local UUID; this queue has no replay.
+        runtimeEventDelivery: "fresh-ids-once",
       } as OpenCodeAdapterShape;
     }),
   ).pipe(

@@ -314,6 +314,41 @@ const make = Effect.gen(function* () {
     });
   };
 
+  const readThreadEnvelopesAfter: ProviderRuntimeEventRepositoryShape["readThreadEnvelopesAfter"] =
+    (input) =>
+      input.eventTypes.length === 0
+        ? Effect.succeed([])
+        : sql<{
+            readonly sequence: number;
+            readonly eventId: string;
+            readonly eventType: string;
+            readonly turnId: string | null;
+            readonly itemId: string | null;
+            readonly itemType: string | null;
+          }>`
+          SELECT
+            sequence,
+            event_id AS "eventId",
+            event_type AS "eventType",
+            turn_id AS "turnId",
+            CASE WHEN json_valid(event_json)
+              THEN json_extract(event_json, '$.itemId') END AS "itemId",
+            CASE WHEN json_valid(event_json)
+              THEN json_extract(event_json, '$.payload.itemType') END AS "itemType"
+          FROM (
+            SELECT sequence, event_id, event_type, turn_id, event_json
+            FROM provider_runtime_events
+            WHERE thread_id = ${input.threadId}
+              AND sequence > ${input.afterSequenceExclusive}
+            ORDER BY sequence ASC
+            LIMIT ${Math.max(1, Math.floor(input.scanLimit))}
+          )
+          WHERE event_type IN ${sql.in(input.eventTypes)}
+          ORDER BY sequence ASC
+        `.pipe(
+            Effect.mapError(toPersistenceSqlError("ProviderRuntimeEvent.readThreadEnvelopesAfter")),
+          );
+
   const readAcceptedOpenTurnEvents: ProviderRuntimeEventRepositoryShape["readAcceptedOpenTurnEvents"] =
     (input) => {
       const limit = Math.max(1, Math.min(1_000, Math.floor(input.limit)));
@@ -866,6 +901,7 @@ const make = Effect.gen(function* () {
     readAfter,
     getThreadCoverage,
     readThreadEvents,
+    readThreadEnvelopesAfter,
     readAcceptedOpenTurnEvents,
     pruneSettledOpenTurns,
     getConsumerCursor,

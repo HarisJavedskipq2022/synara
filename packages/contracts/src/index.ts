@@ -45,6 +45,7 @@ export * from "./pullRequestAutoFix";
 export * from "./githubInbox";
 export * from "./jira";
 export * from "./orchestration";
+export * from "./activityPayloadElision";
 export * from "./asyncUserInput";
 export * from "./editor";
 export * from "./editorIntelligence";

@@ -29,6 +29,7 @@ import {
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
 import { OpenCodeAdapter, type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { isBatchableAssistantText } from "../providerRuntimeTextBatch.ts";
 import {
   appendOpenCodeAssistantTextDelta,
   makeOpenCodeAdapterLive,
@@ -3286,7 +3287,7 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
         const events = Array.from(yield* Fiber.join(eventsFiber));
         eventQueue.close();
 
-        return { events, turn };
+        return { events, turn, delivery: adapter.runtimeEventDelivery };
       }).pipe(
         Effect.provide(
           makeOpenCodeAdapterLive({ runtime: runtime.runtime }).pipe(
@@ -3315,6 +3316,10 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
         delta: "Hello",
       },
     });
+    // Durable text batching relies on fresh canonical ids and empty raw payloads.
+    expect(result.delivery).toBe("fresh-ids-once");
+    expect(result.events[3]?.raw).toEqual({ source: "opencode.sdk.event", payload: {} });
+    expect(isBatchableAssistantText(result.events[3]!)).toBe(true);
     expect(result.events[4]).toMatchObject({
       type: "item.completed",
       payload: {

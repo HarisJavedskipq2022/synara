@@ -36,6 +36,7 @@ import {
   type OrchestrationThreadActivity,
   ModelSelection,
   type ServerSettings,
+  elideUnreadActivityPayloadFields,
 } from "@synara/contracts";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -422,6 +423,24 @@ function toProjectedActivity(row: ProjectionThreadActivityDbRow): OrchestrationT
       : {}),
     createdAt: row.createdAt,
   };
+}
+
+/**
+ * Client thread-detail snapshots only: drop the payload fields no client reads
+ * (see `elideUnreadActivityPayloadFields`) from activities of settled turns. The
+ * latest turn and turnless activities keep their full payload, and so do the
+ * stored rows, live events and every server-side reader.
+ */
+function toClientSnapshotActivity(
+  row: ProjectionThreadActivityDbRow,
+  latestTurnId: TurnId | null,
+): OrchestrationThreadActivity {
+  const activity = toProjectedActivity(row);
+  if (activity.turnId === null || activity.turnId === latestTurnId) {
+    return activity;
+  }
+  const payload = elideUnreadActivityPayloadFields(activity.payload);
+  return payload === activity.payload ? activity : { ...activity, payload };
 }
 
 function toProjectedCheckpoint(row: ProjectionCheckpointDbRow): OrchestrationCheckpointSummary {
@@ -3800,6 +3819,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       // expensive part of a detail read on long threads. Defaults to true.
       readonly includeActivities?: boolean;
       readonly includeLiveCheckpoints?: boolean;
+      // Client snapshots only: thin settled activities' unread payload fields.
+      readonly elideUnreadActivityPayloadFields?: boolean;
     } = {
       messageLimit: MAX_THREAD_MESSAGES,
       tracePrefix: "ProjectionSnapshotQuery.getThreadDetailById",
@@ -3911,12 +3932,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       const requestedTurnIdByMessageId = new Map(
         turnRequestMessageRows.map((row) => [row.messageId, row.turnId] as const),
       );
+      const latestTurn = Option.match(latestTurnRow, {
+        onNone: () => null,
+        onSome: (row) => toProjectedLatestTurn(row),
+      });
+      const latestTurnId = latestTurn?.turnId ?? null;
       const thread = toProjectedThread({
         threadRow: threadRow.value,
-        latestTurn: Option.match(latestTurnRow, {
-          onNone: () => null,
-          onSome: (row) => toProjectedLatestTurn(row),
-        }),
+        latestTurn,
         messages: attachThreadMessageSegments(messageRows, segmentRows).map((row) =>
           withRequestedTurnId(
             orchestrationMessageFromProjectionRow(row),
@@ -3924,7 +3947,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
         proposedPlans: proposedPlanRows.map((row) => toProjectedProposedPlan(row)),
-        activities: activityRows.map((row) => toProjectedActivity(row)),
+        activities: options.elideUnreadActivityPayloadFields
+          ? activityRows.map((row) => toClientSnapshotActivity(row, latestTurnId))
+          : activityRows.map((row) => toProjectedActivity(row)),
         pendingInteractions: pendingInteractionRows,
         checkpoints: checkpointRows.map((row) => toProjectedCheckpoint(row)),
         session: Option.match(sessionRow, {
@@ -4077,6 +4102,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             tracePrefix: "ProjectionSnapshotQuery.getThreadDetailSnapshotById",
             linkTurnRequests: true,
             includeLiveCheckpoints: true,
+            elideUnreadActivityPayloadFields: true,
           }),
           listProjectionStateRows(undefined).pipe(
             Effect.mapError(

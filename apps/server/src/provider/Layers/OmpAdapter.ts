@@ -1324,7 +1324,6 @@ export function makeOmpAdapter(
                             ...(lateScopedItemId ? { itemId: lateScopedItemId } : {}),
                             text: event.text,
                             ...(event.streamKind ? { streamKind: event.streamKind } : {}),
-                            rawPayload: event.rawPayload,
                           }),
                         );
                         return;
@@ -1353,7 +1352,6 @@ export function makeOmpAdapter(
                           ...(scopedItemId ? { itemId: scopedItemId } : {}),
                           text: event.text,
                           ...(event.streamKind ? { streamKind: event.streamKind } : {}),
-                          rawPayload: event.rawPayload,
                         }),
                       );
                     }
@@ -2372,6 +2370,8 @@ export function makeOmpAdapter(
       hasSession,
       stopAll,
       streamEvents,
+      // makeEventStamp mints a fresh local UUID; PubSub subscribers get no replay.
+      runtimeEventDelivery: "fresh-ids-once",
     } satisfies OmpAdapterShape;
   });
 }

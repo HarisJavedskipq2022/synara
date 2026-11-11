@@ -17,6 +17,17 @@ export interface PersistedProviderRuntimeEvent {
 
 export type ProviderRuntimeEventRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
+/** Envelope columns of a journal row, read without decoding its event JSON. */
+export interface ProviderRuntimeEventEnvelopeRow {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly turnId: string | null;
+  /** `null` when absent, or when the stored JSON is not valid JSON. */
+  readonly itemId: string | null;
+  readonly itemType: string | null;
+}
+
 export interface ProviderRuntimeEventRepositoryShape {
   readonly append: (
     event: ProviderRuntimeEvent,
@@ -55,6 +66,18 @@ export interface ProviderRuntimeEventRepositoryShape {
     ReadonlyArray<PersistedProviderRuntimeEvent>,
     ProviderRuntimeEventRepositoryError
   >;
+  /**
+   * The thread's rows after a sequence, oldest first, keeping only `eventTypes`.
+   * At most `scanLimit` rows of the thread are examined (an index range on
+   * thread and sequence), so the cost is bounded however long the journal is.
+   * Event JSON is not decoded.
+   */
+  readonly readThreadEnvelopesAfter: (input: {
+    readonly threadId: string;
+    readonly afterSequenceExclusive: number;
+    readonly eventTypes: ReadonlyArray<string>;
+    readonly scanLimit: number;
+  }) => Effect.Effect<ReadonlyArray<ProviderRuntimeEventEnvelopeRow>, PersistenceSqlError>;
   readonly readAcceptedOpenTurnEvents: (input: {
     readonly consumerName: string;
     readonly sequenceExclusive: number;

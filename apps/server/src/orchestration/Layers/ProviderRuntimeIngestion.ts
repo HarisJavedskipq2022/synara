@@ -105,6 +105,7 @@ import {
   OrchestrationCommandPreviouslyRejectedError,
 } from "../Errors.ts";
 import { makeRuntimeJournalPoisonGate } from "../runtimeJournalPoisonGate.ts";
+import { proveAssistantDeltaApplied } from "./ProviderRuntimeIngestion.replayProof.ts";
 import {
   buildStalePendingRequestSettlementCommand,
   pendingInteractionRequestKind,
@@ -136,8 +137,10 @@ import {
 // Depends on: ProviderRuntimeEvent contracts, OrchestrationEngine, Projection repositories
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
+const providerCommandIdForEventId = (eventId: string, tag: string, target = "event"): CommandId =>
+  CommandId.makeUnsafe(`provider:${eventId}:${tag}:${target}`);
 const providerCommandId = (event: ProviderRuntimeEvent, tag: string, target = "event"): CommandId =>
-  CommandId.makeUnsafe(`provider:${event.eventId}:${tag}:${target}`);
+  providerCommandIdForEventId(event.eventId, tag, target);
 
 // The delivery-mode binding handshake (request queue ↔ runtime turn lifecycle)
 // is in-memory: a server restart, a provider that skips turn.started, or a lost
@@ -2456,6 +2459,60 @@ const make = Effect.gen(function* () {
   >();
   const bufferedTextSpilledByMessageKey = new Set<string>();
 
+  // One warning per turn: every replayed delta of the turn would repeat it.
+  const turnsWithFailedReplayProof = new Set<string>();
+
+  /**
+   * True when an assistant delta of an already finalized turn is a journal
+   * replay of a row applied while the turn was open (see
+   * `proveAssistantDeltaApplied`). Open turns return before any read, and
+   * `isTurnFinalized` is cached per turn, so a streaming delta adds no query.
+   */
+  const assistantDeltaAppliedBeforeFinalization = (
+    event: Extract<ProviderRuntimeEvent, { readonly type: "content.delta" }>,
+    threadId: ThreadId,
+    runtimeSequence: number,
+  ) =>
+    Effect.gen(function* () {
+      // `threadId` is the routed thread the delta path itself checks; the
+      // journal is keyed by the event's own thread.
+      const turnId = toTurnId(event.turnId);
+      if (turnId === undefined || !(yield* isTurnFinalized(threadId, turnId))) return false;
+      return yield* proveAssistantDeltaApplied(
+        {
+          hasReceipt: (commandId) =>
+            commandReceipts
+              .getByCommandId({ commandId: CommandId.makeUnsafe(commandId) })
+              .pipe(Effect.map(Option.isSome)),
+          readEnvelopesAfter: runtimeEvents.readThreadEnvelopesAfter,
+          commandId: providerCommandIdForEventId,
+          onLookupFailure: (cause) => {
+            const key = providerTurnKey(threadId, turnId);
+            if (turnsWithFailedReplayProof.has(key)) return Effect.void;
+            if (turnsWithFailedReplayProof.size >= 1_024) turnsWithFailedReplayProof.clear();
+            turnsWithFailedReplayProof.add(key);
+            return Effect.logWarning(
+              "provider runtime replay could not check whether a delta was applied; applying it",
+              {
+                eventId: event.eventId,
+                threadId,
+                turnId,
+                cause: Cause.pretty(cause),
+              },
+            );
+          },
+        },
+        {
+          eventId: event.eventId,
+          threadId: event.threadId,
+          turnId,
+          itemId: event.itemId,
+          messageId: `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
+          runtimeSequence,
+        },
+      );
+    });
+
   const processRuntimeEvent = (
     event: ProviderRuntimeEvent,
     runtimeSequence: number,
@@ -3368,7 +3425,12 @@ const make = Effect.gen(function* () {
       const proposedPlanDelta =
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
 
-      if (assistantDelta && assistantDelta.length > 0) {
+      if (
+        event.type === "content.delta" &&
+        assistantDelta &&
+        assistantDelta.length > 0 &&
+        !(yield* assistantDeltaAppliedBeforeFinalization(event, thread.id, runtimeSequence))
+      ) {
         const assistantMessageId = MessageId.makeUnsafe(
           `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
         );

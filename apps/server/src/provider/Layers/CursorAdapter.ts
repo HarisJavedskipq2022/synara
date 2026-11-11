@@ -1210,7 +1210,6 @@ export function makeCursorAdapter(
                         ...(event.itemId ? { itemId: event.itemId } : {}),
                         text: event.text,
                         ...(event.streamKind ? { streamKind: event.streamKind } : {}),
-                        rawPayload: event.rawPayload,
                       }),
                     );
                     return;
@@ -2053,6 +2052,8 @@ export function makeCursorAdapter(
       hasSession,
       stopAll,
       streamEvents,
+      // makeEventStamp mints a fresh local UUID; PubSub subscribers get no replay.
+      runtimeEventDelivery: "fresh-ids-once",
     } satisfies CursorAdapterShape;
   });
 }

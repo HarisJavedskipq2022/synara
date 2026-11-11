@@ -924,6 +924,76 @@ layer("ProviderRuntimeEventRepository", (it) => {
       assert.notStrictEqual(persisted[0]?.sequence, persisted[1]?.sequence);
     }),
   );
+
+  it.effect("reads a bounded forward window of envelopes without decoding event JSON", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProviderRuntimeEventRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.makeUnsafe("thread-envelope-window");
+      const base = {
+        provider: "codex" as const,
+        createdAt: "2026-11-11T00:00:00.000Z",
+        threadId,
+        turnId: TurnId.makeUnsafe("turn-envelope-window"),
+      };
+      const start = yield* repository.append({
+        ...base,
+        type: "turn.started",
+        eventId: EventId.makeUnsafe("envelope-start"),
+        payload: {},
+      });
+      yield* repository.append({
+        ...runtimeEvent("envelope-delta", "A"),
+        threadId,
+      });
+      yield* repository.append({
+        ...base,
+        type: "item.completed",
+        eventId: EventId.makeUnsafe("envelope-item"),
+        itemId: RuntimeItemId.makeUnsafe("envelope-message"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      });
+      // A row this version cannot decode (another app version, damage).
+      yield* sql`
+        INSERT INTO provider_runtime_events (
+          event_id, thread_id, turn_id, lifecycle_generation, event_type, event_json, persisted_at
+        ) VALUES (
+          'envelope-undecodable', ${threadId}, 'turn-envelope-window', NULL,
+          'turn.completed', '{not json', '2026-11-11T00:00:00.000Z'
+        )
+      `;
+      const window = yield* repository.readThreadEnvelopesAfter({
+        threadId,
+        afterSequenceExclusive: start.sequence,
+        eventTypes: ["item.completed", "turn.completed"],
+        scanLimit: 10,
+      });
+      assert.deepStrictEqual(
+        window.map((row) => [row.eventId, row.eventType, row.turnId, row.itemId, row.itemType]),
+        [
+          [
+            "envelope-item",
+            "item.completed",
+            "turn-envelope-window",
+            "envelope-message",
+            "assistant_message",
+          ],
+          ["envelope-undecodable", "turn.completed", "turn-envelope-window", null, null],
+        ],
+      );
+      // The bound counts every row of the thread, matching or not.
+      const bounded = yield* repository.readThreadEnvelopesAfter({
+        threadId,
+        afterSequenceExclusive: start.sequence,
+        eventTypes: ["item.completed", "turn.completed"],
+        scanLimit: 2,
+      });
+      assert.deepStrictEqual(
+        bounded.map((row) => row.eventId),
+        ["envelope-item"],
+      );
+    }),
+  );
 });
 
 // Fresh (isolated in-memory) database: retention behaviour is asserted through
