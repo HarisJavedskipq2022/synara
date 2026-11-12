@@ -9,6 +9,7 @@ import type {
   PersistedComposerImageAttachment,
 } from "../composerDraftStore";
 import * as composerImageBlobStore from "./composerImageBlobStore";
+import { WsTransportRequestInterruptedError } from "../wsTransport";
 import {
   buildComposerFileAttachmentsFromFiles,
   stageUploadComposerAttachments,
@@ -390,61 +391,74 @@ describe("composerSend attachment builders", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("cancels every staged managed attachment when dispatch rejects", async () => {
-    const files = [
-      new File(["one"], "one.png", { type: "image/png" }),
-      new File(["two"], "two.png", { type: "image/png" }),
-    ];
-    const ids = [
-      "thread-1-11111111-1111-4111-8111-111111111111",
-      "thread-1-22222222-2222-4222-8222-222222222222",
-    ];
-    const fetchMock = vi.fn<typeof fetch>();
-    for (const [index, file] of files.entries()) {
-      fetchMock.mockResolvedValueOnce(
-        Response.json(
-          {
-            type: "image",
-            id: ids[index],
-            name: file.name,
-            mimeType: file.type,
-            sizeBytes: file.size,
-          },
-          { status: 201 },
-        ),
+  it.each(["rejected", "not_sent", "unknown"] as const)(
+    "retains staged attachments only while delivery is unknown (%s)",
+    async (delivery) => {
+      const files = [
+        new File(["one"], "one.png", { type: "image/png" }),
+        new File(["two"], "two.png", { type: "image/png" }),
+      ];
+      const ids = [
+        "thread-1-11111111-1111-4111-8111-111111111111",
+        "thread-1-22222222-2222-4222-8222-222222222222",
+      ];
+      const fetchMock = vi.fn<typeof fetch>();
+      for (const [index, file] of files.entries()) {
+        fetchMock.mockResolvedValueOnce(
+          Response.json(
+            {
+              type: "image",
+              id: ids[index],
+              name: file.name,
+              mimeType: file.type,
+              sizeBytes: file.size,
+            },
+            { status: 201 },
+          ),
+        );
+      }
+      fetchMock
+        .mockResolvedValueOnce(Response.json({ cancelled: true }, { status: 200 }))
+        .mockResolvedValueOnce(Response.json({ cancelled: true }, { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const staged = await stageUploadComposerAttachments({
+        threadId: "thread-1",
+        images: files.map((file, index) => ({
+          type: "image" as const,
+          id: `draft-${index}`,
+          name: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+          previewUrl: `blob:${file.name}`,
+          file,
+        })),
+        files: [],
+        assistantSelections: [],
+      });
+      const dispatchError =
+        delivery === "rejected"
+          ? new Error("Dispatch rejected.")
+          : new WsTransportRequestInterruptedError({
+              code: "WS_REQUEST_RECONNECTED",
+              method: "orchestration.dispatchCommand",
+              message: "Connection interrupted.",
+              delivery,
+              retryable: false,
+            });
+
+      await expect(staged.runWithDispatch(async () => Promise.reject(dispatchError))).rejects.toBe(
+        dispatchError,
       );
-    }
-    fetchMock
-      .mockResolvedValueOnce(Response.json({ cancelled: true }, { status: 200 }))
-      .mockResolvedValueOnce(Response.json({ cancelled: true }, { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const staged = await stageUploadComposerAttachments({
-      threadId: "thread-1",
-      images: files.map((file, index) => ({
-        type: "image" as const,
-        id: `draft-${index}`,
-        name: file.name,
-        mimeType: file.type,
-        sizeBytes: file.size,
-        previewUrl: `blob:${file.name}`,
-        file,
-      })),
-      files: [],
-      assistantSelections: [],
-    });
-    const dispatchError = new Error("Dispatch rejected.");
 
-    await expect(staged.runWithDispatch(async () => Promise.reject(dispatchError))).rejects.toBe(
-      dispatchError,
-    );
-
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    const cancelledIds = fetchMock.mock.calls
-      .slice(2)
-      .map(([, options]) => JSON.parse(String(options?.body)).attachmentId)
-      .sort();
-    expect(cancelledIds).toEqual(ids.toSorted());
-  });
+      await staged.cleanup();
+      expect(fetchMock).toHaveBeenCalledTimes(delivery === "unknown" ? 2 : 4);
+      const cancelledIds = fetchMock.mock.calls
+        .slice(2)
+        .map(([, options]) => JSON.parse(String(options?.body)).attachmentId)
+        .sort();
+      expect(cancelledIds).toEqual(delivery === "unknown" ? [] : ids.toSorted());
+    },
+  );
 
   it("commits successful dispatches so later cleanup does not cancel", async () => {
     const imageFile = new File(["png"], "screen.png", { type: "image/png" });

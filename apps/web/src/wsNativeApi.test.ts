@@ -6,6 +6,7 @@
 import {
   ApprovalRequestId,
   CommandId,
+  MessageId,
   COMPUTER_WS_CHANNELS,
   type ContextMenuItem,
   DEVICE_WS_CHANNELS,
@@ -710,6 +711,78 @@ describe("wsNativeApi", () => {
     } as never);
     expect(sentHelix()).toBeUndefined();
   });
+
+  it.each([false, true, "same choice touched again"] as const)(
+    "settles the original Helix pairing after a lost acknowledgement (newer choice: %s)",
+    async (newerChoice) => {
+      Object.assign(getWindowForTest(), {
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      });
+      const { stubComposerDraftBrowserStorage } = await import("./composerDraftStoreTestFixtures");
+      stubComposerDraftBrowserStorage();
+      const { createWsNativeApi } = await import("./wsNativeApi");
+      const { setHelixDraftChoice, useHelixDraftStore } = await import("./helix/helixDraftStore");
+      const { dispatchOwnedComposerTurn, settlePendingComposerTurn } =
+        await import("./lib/composerTurnSettlement");
+      helixCapabilities = [WS_HELIX_MESSAGE_PAIRING_CAPABILITY];
+      const api = createWsNativeApi();
+      const threadId = ThreadId.makeUnsafe("helix-lost-ack");
+      const pairing = {
+        enabled: true,
+        builderModelSelection: { provider: "codex", instanceId: "codex", model: "gpt-5.5" },
+      } as const;
+      setHelixDraftChoice(threadId, pairing);
+      const command = {
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("helix-original-command"),
+        dispatchMode: "queue",
+        threadId,
+        message: {
+          messageId: MessageId.makeUnsafe("helix-original-message"),
+          role: "user",
+          text: "go",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-11-13T00:00:00.000Z",
+      } as const;
+      const interruption = Object.assign(new Error("Delivery could not be checked."), {
+        _tag: "WsTransportRequestInterruptedError",
+        code: "WS_TURN_SETTLEMENT_UNAVAILABLE",
+        delivery: "unknown",
+      });
+      requestMock.mockRejectedValueOnce(interruption);
+      await expect(dispatchOwnedComposerTurn(api, command, "helix-queued-turn")).rejects.toBe(
+        interruption,
+      );
+      const sent = { ...command, helix: pairing };
+      expect(requestMock).toHaveBeenCalledWith(ORCHESTRATION_WS_METHODS.dispatchCommand, {
+        command: sent,
+      });
+      if (newerChoice) {
+        setHelixDraftChoice(threadId, newerChoice === true ? { enabled: false } : pairing);
+      }
+      requestMock.mockResolvedValueOnce({ status: "accepted", sequence: 7 });
+      await expect(settlePendingComposerTurn(api, threadId, "helix-queued-turn")).resolves.toEqual({
+        status: "accepted",
+        queuedTurnId: "helix-queued-turn",
+        messageId: command.message.messageId,
+      });
+      expect(requestMock).toHaveBeenLastCalledWith(ORCHESTRATION_WS_METHODS.settleTurnDispatch, {
+        command: sent,
+      });
+      expect(
+        requestMock.mock.calls.filter(
+          ([method]) => method === ORCHESTRATION_WS_METHODS.dispatchCommand,
+        ),
+      ).toHaveLength(1);
+      expect(useHelixDraftStore.getState().choiceByThreadId.get(threadId)).toEqual(
+        newerChoice === true ? { enabled: false } : newerChoice ? pairing : undefined,
+      );
+    },
+  );
 
   it("refuses Helix calls locally until the server advertises helix.pairs", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");

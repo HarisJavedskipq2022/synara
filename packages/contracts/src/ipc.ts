@@ -400,6 +400,8 @@ import type {
 } from "./terminal";
 import type {
   ClientOrchestrationCommand,
+  OrchestrationSettleTurnDispatchInput,
+  OrchestrationSettleTurnDispatchResult,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
   OrchestrationGetThreadDetailSnapshotInput,
@@ -1536,6 +1538,9 @@ export interface NativeApi {
     dispatchCommand: (
       command: ClientOrchestrationCommand,
     ) => Promise<{ sequence: number; helixPairing?: HelixPairingOutcome }>;
+    settleTurnDispatch?: (
+      input: typeof OrchestrationSettleTurnDispatchInput.Type,
+    ) => Promise<OrchestrationSettleTurnDispatchResult>;
     importThread: (
       input: OrchestrationImportThreadInput,
     ) => Promise<OrchestrationImportThreadResult>;

@@ -987,8 +987,14 @@ export function createWsNativeApi(): NativeApi {
           },
         ).then(
           (result) => {
-            if (pairing && "threadId" in command) {
-              void recordHelixPairingOutcome(command.threadId, pairing, result.helixPairing);
+            const sentPairing =
+              pairing ??
+              (command.type === "thread.turn.start" ||
+              command.type === "thread.message.edit-and-resend"
+                ? command.helix
+                : undefined);
+            if (sentPairing && "threadId" in command) {
+              void recordHelixPairingOutcome(command.threadId, sentPairing, result.helixPairing);
             }
             return result;
           },
@@ -997,6 +1003,8 @@ export function createWsNativeApi(): NativeApi {
           },
         );
       },
+      settleTurnDispatch: (input) =>
+        executionRequest(ORCHESTRATION_WS_METHODS.settleTurnDispatch, input),
       importThread: (input) => executionRequest(ORCHESTRATION_WS_METHODS.importThread, input),
       listProjectImports: (input) =>
         executionRequest(ORCHESTRATION_WS_METHODS.listProjectImports, input),

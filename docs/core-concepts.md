@@ -292,6 +292,11 @@ A Stop that was still being delivered when the server exited does not block the 
 provider session it was sent to belonged to that server process, so the next start settles the
 Stop without resending it and clears a block an earlier version left for that reason.
 
+If a message's acknowledgement is lost, the composer retains its original delivery identity
+and checks the server's durable result before retrying. While that result is unknown, its
+queued message and uploaded attachments remain available. Recovery checks the Helix pairing
+the message actually carried; a newer selection stays available for the next message.
+
 Messages queued above the composer while a turn runs are sent one by one after it completes.
 If you press Stop, or the turn fails or hits a usage limit, the queue pauses instead: it
 stays visible with **Queue paused** and the reason. **Resume** sends the queue in order;
