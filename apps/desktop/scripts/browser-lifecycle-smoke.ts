@@ -10,6 +10,7 @@ import { configureElectronNetwork } from "betterwright/electron";
 import { WebSocketServer } from "ws";
 import { getBetterwrightNetworkGuard } from "../src/browserAutomation/betterwrightNetworkGuard";
 import { runBetterwright } from "../src/browserAutomation/betterwrightRuntime";
+import { BrowserAutomationHostError } from "../src/browserAutomation/hostErrors";
 import { captureBrowserScreenshot } from "../src/browserAutomation/screenshotCapture";
 import { synaraHostTarget } from "../src/browserAutomation/betterwrightHostTarget";
 import { BrowserVaultCapture } from "../src/browserAutomation/browserVaultCapture";
@@ -148,6 +149,34 @@ async function checkRunRequestLifetime(contents: WebContents, url: string) {
   await contents.executeJavaScript("window.releaseTimedOut?.(); void 0");
   assert.equal(await run("return await page.title()"), "Lifecycle fixture");
   assert.equal(await contents.executeJavaScript("window.lateMutation === true"), false);
+
+  // Exercise the diagnostics and typing guard through the installed worker,
+  // rather than just its mocked failure envelope.
+  await assert.rejects(run("setTimeout(() => {}, 1)"), (error: unknown) => {
+    assert.ok(error instanceof BrowserAutomationHostError);
+    assert.equal(error.browserError.code, "BrowserScriptApiUnavailable");
+    assert.match(error.browserError.cause?.message ?? "", /setTimeout is unavailable/);
+    return true;
+  });
+  await contents.executeJavaScript(`(() => {
+    const input = document.createElement('input');
+    input.id = 'deadline-fixture';
+    input.value = 'preserved';
+    document.body.append(input);
+  })()`);
+  await assert.rejects(
+    run("await human.type(page.locator('#deadline-fixture'), 'x'.repeat(1000))", undefined, 1_000),
+    (error: unknown) => {
+      assert.ok(error instanceof BrowserAutomationHostError);
+      assert.equal(error.browserError.code, "BrowserEvaluationFailed");
+      assert.match(error.browserError.cause?.message ?? "", /Nothing was typed/);
+      return true;
+    },
+  );
+  assert.equal(
+    await contents.executeJavaScript("document.querySelector('#deadline-fixture').value"),
+    "preserved",
+  );
 
   const screenshot = await captureBrowserScreenshot(
     { webContents: contents, tabId: "request-fixture" } as BrowserAutomationVisibleRuntime,
