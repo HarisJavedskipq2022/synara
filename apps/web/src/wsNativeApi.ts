@@ -66,6 +66,11 @@ import {
   DEVICE_WS_METHODS,
   type DeviceEvent,
   type ProjectAgentStreamEvent,
+  HELIX_RPC_ERROR_CODES,
+  HELIX_WS_METHODS,
+  WS_HELIX_MESSAGE_PAIRING_CAPABILITY,
+  WS_HELIX_PAIRS_CAPABILITY,
+  type HelixStreamEvent,
   COMPUTER_WS_CHANNELS,
   COMPUTER_WS_METHODS,
   type ComputerEvent,
@@ -74,6 +79,14 @@ import { VOICE_TRANSCRIPTION_UPLOAD_ROUTE_PATH } from "@synara/shared/binaryTran
 import { Schema } from "effect";
 
 import { showConfirmDialogFallback } from "./confirmDialogFallback";
+import {
+  classifyHelixError,
+  helixCommandRefusalMessageKey,
+  helixRefusalReasonMessageKey,
+} from "./helix/helixErrors";
+import { attachHelixMessagePairing, recordHelixPairingOutcome } from "./helix/helixDraftStore";
+import { useHelixStore } from "./helix/helixStore";
+import { t } from "./i18n";
 import { TASKS_OFFERED_BY_BUILD } from "./tasksSurface";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { requireHttpExternalUrl } from "./lib/externalUrl";
@@ -168,6 +181,38 @@ const gitWorktreeSetupProgressListeners = createListenerRegistry<GitWorktreeSetu
 const projectProvisionProgressListeners =
   createListenerRegistry<GitHubProjectProvisionProgressEvent>();
 
+/**
+ * Helix refuses some ordinary commands on a Lead or Builder (all as
+ * HELIX_UNSUPPORTED_THREAD). Replace the message with the chat's own sentence for
+ * that command; the server's text stays available as `serverMessage`.
+ */
+function explainHelixCommandRefusal(
+  command: Parameters<NativeApi["orchestration"]["dispatchCommand"]>[0],
+  error: unknown,
+): unknown {
+  if (classifyHelixError(error) !== "unsupported_thread") return error;
+  const threadId = "threadId" in command ? String(command.threadId) : null;
+  const isBuilder =
+    threadId !== null && useHelixStore.getState().leadByBuilderThreadId.has(threadId);
+  const record = command as unknown as { readonly type: string } & Readonly<
+    Record<string, unknown>
+  >;
+  // Servers with `WsRpcError.reason` say which guard refused; older ones leave it to the command.
+  const reason =
+    typeof (error as { reason?: unknown }).reason === "string"
+      ? (error as { reason: string }).reason
+      : undefined;
+  const messageKey =
+    (reason !== undefined ? helixRefusalReasonMessageKey(reason) : null) ??
+    helixCommandRefusalMessageKey(record, isBuilder);
+  return Object.assign(new Error(t(messageKey)), {
+    code: (error as { code: string }).code,
+    reason,
+    serverMessage: error instanceof Error ? error.message : undefined,
+    cause: error,
+  });
+}
+
 function omitNullUserInputAnswers(
   command: Parameters<NativeApi["orchestration"]["dispatchCommand"]>[0],
 ) {
@@ -190,6 +235,7 @@ const automationEventListeners = createListenerRegistry<AutomationStreamEvent>()
 const todoEventListeners = createListenerRegistry<TodoStreamEvent>();
 const deviceEventListeners = createListenerRegistry<DeviceEvent>();
 const projectAgentEventListeners = createListenerRegistry<ProjectAgentStreamEvent>();
+const helixEventListeners = createListenerRegistry<HelixStreamEvent>();
 const computerEventListeners = createListenerRegistry<ComputerEvent>();
 const orchestrationDomainEventListeners = createListenerRegistry<OrchestrationEvent>();
 const orchestrationShellEventListeners = createListenerRegistry<OrchestrationShellStreamItem>();
@@ -215,6 +261,7 @@ function clearWsNativeApiListeners(): void {
   todoEventListeners.clear();
   deviceEventListeners.clear();
   projectAgentEventListeners.clear();
+  helixEventListeners.clear();
   computerEventListeners.clear();
   orchestrationDomainEventListeners.clear();
   orchestrationShellEventListeners.clear();
@@ -511,6 +558,20 @@ export function createWsNativeApi(): NativeApi {
   };
   let unsubscribeDomainEventTransport: (() => void) | null = null;
   const projectAgentSubscribeCounts = new Map<string, number>();
+  // Ref counts per `helix.subscribe` scope ("*" or a Lead thread id).
+  const helixSubscribeCounts = new Map<string, number>();
+  // A server without `helix.pairs` does not serve these methods. Refuse locally with
+  // the same code the server uses when Helix is missing, so callers have one path.
+  const helixRequest = <T>(method: string, input: unknown): Promise<T> => {
+    if (transport.getCompatibility()?.capabilities.includes(WS_HELIX_PAIRS_CAPABILITY) !== true) {
+      return Promise.reject(
+        Object.assign(new Error("Helix is not available on this server."), {
+          code: HELIX_RPC_ERROR_CODES.unavailable,
+        }),
+      );
+    }
+    return executionRequest<T>(method, input);
+  };
   transport.onStateChange((state) => emitWsTransportState(state), { replayCurrent: true });
   transport.onCompatibilityIssue((issue) => emitWsCompatibilityIssue(issue), {
     replayCurrent: true,
@@ -569,6 +630,9 @@ export function createWsNativeApi(): NativeApi {
   }
   transport.subscribe(WS_CHANNELS.projectAgentEvent, (message) => {
     projectAgentEventListeners.emit(message.data);
+  });
+  transport.onHelixEvent((event) => {
+    helixEventListeners.emit(event);
   });
   transport.subscribe(ORCHESTRATION_WS_CHANNELS.shellEvent, (message) => {
     orchestrationShellEventListeners.emit(message.data);
@@ -910,10 +974,28 @@ export function createWsNativeApi(): NativeApi {
       getThreadDetailSnapshot: (input) =>
         executionRequest(ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot, input),
       searchThreads: (input) => executionRequest(ORCHESTRATION_WS_METHODS.searchThreads, input),
-      dispatchCommand: (command) => {
-        return executionRequest(ORCHESTRATION_WS_METHODS.dispatchCommand, {
-          command: omitNullUserInputAnswers(command),
-        });
+      dispatchCommand: (input) => {
+        // A user message carries the Helix choice its composer holds, when the server takes it.
+        const { command, pairing } = attachHelixMessagePairing(
+          input,
+          readWsServerCapabilities()?.includes(WS_HELIX_MESSAGE_PAIRING_CAPABILITY) === true,
+        );
+        return executionRequest<Awaited<ReturnType<NativeApi["orchestration"]["dispatchCommand"]>>>(
+          ORCHESTRATION_WS_METHODS.dispatchCommand,
+          {
+            command: omitNullUserInputAnswers(command),
+          },
+        ).then(
+          (result) => {
+            if (pairing && "threadId" in command) {
+              void recordHelixPairingOutcome(command.threadId, pairing, result.helixPairing);
+            }
+            return result;
+          },
+          (error: unknown) => {
+            throw explainHelixCommandRefusal(command, error);
+          },
+        );
       },
       importThread: (input) => executionRequest(ORCHESTRATION_WS_METHODS.importThread, input),
       listProjectImports: (input) =>
@@ -1086,6 +1168,40 @@ export function createWsNativeApi(): NativeApi {
         await transport.unsubscribeProjectAgentEvents(input.projectId);
       },
       onEvent: projectAgentEventListeners.subscribe,
+    },
+    helix: {
+      capabilities: () => helixRequest(HELIX_WS_METHODS.capabilities, {}),
+      listPairs: () => helixRequest(HELIX_WS_METHODS.listPairs, {}),
+      getPair: (input) => helixRequest(HELIX_WS_METHODS.getPair, input),
+      enable: (input) => helixRequest(HELIX_WS_METHODS.enable, input),
+      disable: (input) => helixRequest(HELIX_WS_METHODS.disable, input),
+      updateConfig: (input) => helixRequest(HELIX_WS_METHODS.updateConfig, input),
+      pause: (input) => helixRequest(HELIX_WS_METHODS.pause, input),
+      resume: (input) => helixRequest(HELIX_WS_METHODS.resume, input),
+      stop: (input) => helixRequest(HELIX_WS_METHODS.stop, input),
+      removePair: (input) => helixRequest(HELIX_WS_METHODS.removePair, input),
+      subscribe: async (input) => {
+        const scope = input.leadThreadId ?? "*";
+        const count = (helixSubscribeCounts.get(scope) ?? 0) + 1;
+        helixSubscribeCounts.set(scope, count);
+        if (count > 1) return;
+        await helixRequest<void>(HELIX_WS_METHODS.subscribe, input).catch((error: unknown) => {
+          // Not subscribed after all: a later subscribe must try again.
+          if (helixSubscribeCounts.get(scope) === count) helixSubscribeCounts.delete(scope);
+          throw error;
+        });
+      },
+      unsubscribe: async (input) => {
+        const scope = input.leadThreadId ?? "*";
+        const count = (helixSubscribeCounts.get(scope) ?? 0) - 1;
+        if (count > 0) {
+          helixSubscribeCounts.set(scope, count);
+          return;
+        }
+        helixSubscribeCounts.delete(scope);
+        await transport.unsubscribeHelixEvents(input.leadThreadId);
+      },
+      onEvent: helixEventListeners.subscribe,
     },
     automation: {
       list: (input) => executionRequest(WS_METHODS.automationList, input),

@@ -1669,6 +1669,55 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * A Helix pairing carried by a user message (docs/plans/helix-prototype.md,
+ * section 18). Absent means no change. `enabled: true` turns Helix on for the
+ * chat with this Builder model selection (its options carry the effort), or
+ * changes the Builder; `enabled: false` turns it off. The server applies it once,
+ * only when the message is accepted, before the message's turn starts; a busy
+ * pair keeps it pending until idle. Re-exported from `./helix`.
+ * Clients send it only to servers advertising `helix.message-pairing`.
+ */
+export const HelixMessagePairing = Schema.Union([
+  Schema.Struct({ enabled: Schema.Literal(true), builderModelSelection: ModelSelection }),
+  Schema.Struct({ enabled: Schema.Literal(false) }),
+]);
+export type HelixMessagePairing = typeof HelixMessagePairing.Type;
+
+/** Why a message's Helix pairing was not applied. The message itself was still sent. */
+export const HelixPairingNotAppliedReason = Schema.Literals([
+  /** The `enableHelix` setting is off. */
+  "setting_off",
+  /** A sub-agent, side chat or Hub thread cannot lead a pair. */
+  "unsupported_thread",
+  /** The chat's own provider cannot lead a pair. */
+  "unsupported_lead_provider",
+  /** The Builder model's provider is not qualified. */
+  "unsupported_builder_provider",
+  /** The chat is a Helix Builder (or a retired one). */
+  "builder_thread",
+  /** The chat's pair data could not be read; remove the pair first. */
+  "quarantined",
+  /** Helix is not available on this server, or could not record the change. */
+  "unavailable",
+  /** Only the owner may change Helix (as for the helix.* RPCs); the message was still sent. */
+  "not_permitted",
+]);
+export type HelixPairingNotAppliedReason = typeof HelixPairingNotAppliedReason.Type;
+
+/** What the server will do with a message's pairing, returned in `DispatchResult.helixPairing`. */
+export const HelixPairingOutcome = Schema.Struct({
+  /**
+   * `applied`: in effect before this message's turn starts. `pending`: the pair
+   * is busy; applied at its next idle boundary (visible as the pair's
+   * `config.pendingChange`). `unchanged`: already so. `not_applied`: see `reason`.
+   */
+  status: Schema.Literals(["applied", "pending", "unchanged", "not_applied"]),
+  reason: Schema.optional(HelixPairingNotAppliedReason),
+  message: Schema.optional(Schema.String),
+});
+export type HelixPairingOutcome = typeof HelixPairingOutcome.Type;
+
 export const ComputerControlMode = Schema.Literals(["off", "request", "chat"]);
 export type ComputerControlMode = typeof ComputerControlMode.Type;
 
@@ -1703,6 +1752,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
     Schema.withDecodingDefault(() => DEFAULT_PROVIDER_INTERACTION_MODE),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  /** Optional Helix pairing riding on this message; absent = no change. */
+  helix: Schema.optional(HelixMessagePairing),
   // Server-only (quit resume): accept the turn only while the thread is not archived,
   // has nothing in flight, and no turn finished on its own since the record was
   // taken (the recorded turn itself, or any later one). Clients cannot set it:
@@ -1743,6 +1794,8 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  /** Optional Helix pairing riding on this message; absent = no change. */
+  helix: Schema.optional(HelixMessagePairing),
   createdAt: IsoDateTime,
 });
 
@@ -1883,6 +1936,8 @@ const ThreadMessageEditAndResendCommand = Schema.Struct({
   assistantDeliveryMode: Schema.optional(AssistantDeliveryMode),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  /** Optional Helix pairing riding on this message; absent = no change. */
+  helix: Schema.optional(HelixMessagePairing),
   createdAt: IsoDateTime,
 });
 
@@ -3029,6 +3084,8 @@ export type ProjectionCheckpointRow = typeof ProjectionCheckpointRow.Type;
 
 export const DispatchResult = Schema.Struct({
   sequence: NonNegativeInt,
+  /** Present when the command carried a Helix pairing. */
+  helixPairing: Schema.optional(HelixPairingOutcome),
 });
 export type DispatchResult = typeof DispatchResult.Type;
 

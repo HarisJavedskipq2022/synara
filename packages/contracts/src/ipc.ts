@@ -159,6 +159,22 @@ import type {
   ProjectThreadIndexEntry,
 } from "./projectAgent";
 import type {
+  HelixCapabilitiesResult,
+  HelixEnableInput,
+  HelixGetPairInput,
+  HelixGetPairResult,
+  HelixListPairsResult,
+  HelixPairControlInput,
+  HelixPairView,
+  HelixPairingOutcome,
+  HelixRemovePairInput,
+  HelixRemovePairResult,
+  HelixStopInput,
+  HelixStreamEvent,
+  HelixSubscribeInput,
+  HelixUpdateConfigInput,
+} from "./helix";
+import type {
   GitCheckoutInput,
   GitActionProgressEvent,
   GitWorktreeSetupProgressEvent,
@@ -1516,7 +1532,10 @@ export interface NativeApi {
     searchThreads: (
       input: OrchestrationSearchThreadsInput,
     ) => Promise<OrchestrationSearchThreadsResult>;
-    dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
+    /** `helixPairing` is present when the command carried a Helix pairing. */
+    dispatchCommand: (
+      command: ClientOrchestrationCommand,
+    ) => Promise<{ sequence: number; helixPairing?: HelixPairingOutcome }>;
     importThread: (
       input: OrchestrationImportThreadInput,
     ) => Promise<OrchestrationImportThreadResult>;
@@ -1684,6 +1703,26 @@ export interface NativeApi {
     subscribe: (input: { projectId: string }) => Promise<void>;
     unsubscribe: (input: { projectId: string }) => Promise<void>;
     onEvent: (callback: (event: ProjectAgentStreamEvent) => void) => () => void;
+  };
+  /**
+   * Helix Lead/Builder pairs. Optional: present only when the connected server
+   * advertises the `helix.pairs` capability (docs/plans/helix-prototype.md).
+   */
+  helix?: {
+    capabilities: () => Promise<HelixCapabilitiesResult>;
+    listPairs: () => Promise<HelixListPairsResult>;
+    getPair: (input: HelixGetPairInput) => Promise<HelixGetPairResult>;
+    enable: (input: HelixEnableInput) => Promise<HelixPairView>;
+    disable: (input: HelixPairControlInput) => Promise<HelixPairView>;
+    updateConfig: (input: HelixUpdateConfigInput) => Promise<HelixPairView>;
+    pause: (input: HelixPairControlInput) => Promise<HelixPairView>;
+    resume: (input: HelixPairControlInput) => Promise<HelixPairView>;
+    stop: (input: HelixStopInput) => Promise<HelixPairView>;
+    /** Optional: servers before `helix.removePair` lack it. */
+    removePair?: (input: HelixRemovePairInput) => Promise<HelixRemovePairResult>;
+    subscribe: (input: HelixSubscribeInput) => Promise<void>;
+    unsubscribe: (input: HelixSubscribeInput) => Promise<void>;
+    onEvent: (callback: (event: HelixStreamEvent) => void) => () => void;
   };
   automation: {
     list: (input?: AutomationListInput) => Promise<AutomationListResult>;

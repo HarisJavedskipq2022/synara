@@ -3,6 +3,9 @@ import { ThreadId } from "@synara/contracts";
 
 import { makeAgentGatewaySessionRegistry } from "./AgentGatewaySessionRegistry.ts";
 
+const sorted = (capabilities: ReadonlySet<string> | undefined) =>
+  [...(capabilities ?? [])].toSorted();
+
 describe("AgentGatewaySessionRegistry", () => {
   it("permanently revokes old computer credentials through re-enable", () => {
     const registry = makeAgentGatewaySessionRegistry();
@@ -135,5 +138,111 @@ describe("AgentGatewaySessionRegistry", () => {
 
     assert.isFalse(ordinary.capabilities.has("computer:control"));
     assert.isTrue(optedIn.capabilities.has("computer:control"));
+  });
+
+  describe("Helix role profiles", () => {
+    const BASE = [
+      "automation:write",
+      "browser:control",
+      "device:control",
+      "diagnostics:read",
+      "thread:read",
+      "thread:write",
+    ];
+
+    it("leaves a thread without a profile exactly as before", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const thread = ThreadId.makeUnsafe("ordinary");
+      const issued = registry.issue(thread, "codex");
+      assert.deepStrictEqual(sorted(issued.capabilities), BASE);
+      assert.deepStrictEqual(sorted(registry.verify(issued.token)?.capabilities), BASE);
+      assert.isUndefined(registry.verify(issued.token)?.roleProfile);
+      assert.isNull(registry.getThreadRoleProfile(thread));
+    });
+
+    it("without a profile: no profile key anywhere and computer control as before", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const ordinary = registry.issue(ThreadId.makeUnsafe("plain"), "codex");
+      const optedIn = registry.issue(ThreadId.makeUnsafe("computer"), "codex", {
+        additionalCapabilities: ["computer:control"],
+      });
+      for (const issued of [ordinary, optedIn]) {
+        assert.notProperty(issued, "roleProfile");
+        assert.notProperty(registry.verify(issued.token) ?? {}, "roleProfile");
+      }
+      assert.isFalse(registry.computerControlProvisioned?.(ThreadId.makeUnsafe("plain"), "codex"));
+      assert.isTrue(
+        registry.computerControlProvisioned?.(ThreadId.makeUnsafe("computer"), "codex"),
+      );
+      // Clearing a profile that was never set changes nothing.
+      registry.setThreadRoleProfile(ThreadId.makeUnsafe("plain"), null);
+      assert.deepStrictEqual(sorted(registry.verify(ordinary.token)?.capabilities), BASE);
+      assert.notProperty(registry.verify(ordinary.token) ?? {}, "roleProfile");
+    });
+
+    it("gives a Builder exactly helix:builder, dropping base and requested capabilities", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const thread = ThreadId.makeUnsafe("builder");
+      registry.setThreadRoleProfile(thread, { kind: "helix_builder", pairId: "pair-1" });
+      const issued = registry.issue(thread, "codex", {
+        additionalCapabilities: ["computer:control"],
+      });
+      assert.deepStrictEqual(sorted(issued.capabilities), ["helix:builder"]);
+      const verified = registry.verify(issued.token);
+      assert.deepStrictEqual(sorted(verified?.capabilities), ["helix:builder"]);
+      assert.deepStrictEqual(verified?.roleProfile, { kind: "helix_builder", pairId: "pair-1" });
+      assert.isFalse(registry.computerControlProvisioned?.(thread, "codex"));
+      // Write authority still binds to the exact turn; only the capability set changes.
+      assert.isNotNull(registry.bindWriteAuthority(issued.token, "turn-1"));
+    });
+
+    it("gives a Lead its normal capabilities plus helix:lead", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const thread = ThreadId.makeUnsafe("lead");
+      registry.setThreadRoleProfile(thread, { kind: "helix_lead", pairId: "pair-1" });
+      const issued = registry.issue(thread, "claudeAgent", {
+        additionalCapabilities: ["computer:control"],
+      });
+      assert.deepStrictEqual(
+        sorted(registry.verify(issued.token)?.capabilities),
+        [...BASE, "computer:control", "helix:lead"].toSorted(),
+      );
+    });
+
+    it("applies to credentials issued before the profile, and clearing restores them", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const thread = ThreadId.makeUnsafe("late");
+      const issued = registry.issue(thread, "codex");
+      registry.setThreadRoleProfile(thread, { kind: "helix_builder", pairId: "pair-1" });
+      assert.deepStrictEqual(sorted(registry.verify(issued.token)?.capabilities), [
+        "helix:builder",
+      ]);
+      registry.setThreadRoleProfile(thread, null);
+      assert.deepStrictEqual(sorted(registry.verify(issued.token)?.capabilities), BASE);
+    });
+
+    it("a retired Builder keeps no capabilities on credentials issued before or after", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      const thread = ThreadId.makeUnsafe("retired");
+      registry.setThreadRoleProfile(thread, { kind: "helix_builder", pairId: "pair-1" });
+      const live = registry.issue(thread, "codex", {
+        additionalCapabilities: ["computer:control"],
+      });
+      registry.setThreadRoleProfile(thread, { kind: "helix_retired", pairId: "pair-1" });
+      assert.deepStrictEqual(sorted(registry.verify(live.token)?.capabilities), []);
+      const later = registry.issue(thread, "codex");
+      assert.deepStrictEqual(sorted(registry.verify(later.token)?.capabilities), []);
+      assert.isFalse(registry.computerControlProvisioned?.(thread, "codex"));
+    });
+
+    it("never leaks a profile to another thread", () => {
+      const registry = makeAgentGatewaySessionRegistry();
+      registry.setThreadRoleProfile(ThreadId.makeUnsafe("builder"), {
+        kind: "helix_builder",
+        pairId: "pair-1",
+      });
+      const other = registry.issue(ThreadId.makeUnsafe("other"), "codex");
+      assert.deepStrictEqual(sorted(registry.verify(other.token)?.capabilities), BASE);
+    });
   });
 });

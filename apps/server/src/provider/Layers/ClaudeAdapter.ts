@@ -52,6 +52,7 @@ import {
   ProviderItemId,
   type ProviderRuntimeEvent,
   type ProviderRuntimeTurnStatus,
+  type ProviderHelixRoleContext,
   type ProviderSendTurnInput,
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
@@ -123,10 +124,12 @@ import {
 
 import { buildClaudeMcpServers } from "../../agentGateway/mcpInjection.ts";
 import { renderSynaraHarnessPolicy } from "../../agentGateway/harnessPolicy.ts";
+import { shouldAllowSynaraComputerProviderTool } from "../../agentGateway/computerToolPermission.ts";
 import {
-  isSynaraGatewayToolName,
-  shouldAllowSynaraComputerProviderTool,
-} from "../../agentGateway/computerToolPermission.ts";
+  CLAUDE_HELIX_TOOL_NAMES,
+  isHelixToolCallFromSubagent,
+  shouldAutoApproveGatewayToolForSession,
+} from "../helixToolApproval.ts";
 import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import { PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY } from "../Services/ProviderAdapter.ts";
 import {
@@ -1581,22 +1584,53 @@ const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 1_000;
 // The SDK's interrupt resolves only once the CLI acknowledges it; a wedged CLI
 // would otherwise stall the caller (and the provider command reactor) forever.
 const CLAUDE_INTERRUPT_TIMEOUT = Duration.seconds(10);
+const CLAUDE_SUBAGENT_GUIDANCE = [
+  "When spawning subagents, set the Agent tool's `model` parameter and pick reasoning effort by choosing a worker-<tier> subagent type (worker-low, worker-medium, worker-high, worker-xhigh).",
+  "Honor explicit user instructions about a subagent's model or effort verbatim; otherwise match task complexity: mechanical work → haiku or worker-low, standard work → sonnet or worker-medium, hard reasoning → opus or fable with worker-high and above.",
+];
+const CLAUDE_HELIX_LEAD_SUBAGENT_GUIDANCE =
+  "Subagents are for investigation and review; implementation work goes to the Helix Builder through helix_delegate, not to a subagent.";
+
+/**
+ * Native delegation tools a Helix Builder cannot use: its brief is its own to
+ * finish, and its credential could not drive the workers anyway. Removed from
+ * the model's context by the SDK, not only discouraged.
+ */
+// EnterWorktree would move the Builder out of the Lead's worktree, which it must share.
+export const CLAUDE_HELIX_BUILDER_DISALLOWED_TOOLS = [
+  "Agent",
+  "Task",
+  "Workflow",
+  "EnterWorktree",
+] as const;
+
+const CLAUDE_HELIX_SUBAGENT_DENIAL =
+  "Helix tools are for the Lead's own turn. A sub-agent cannot delegate, wait on, inspect, review or report Helix work; return your findings to the Lead instead.";
+
+/**
+ * Appended after Claude Code's own system prompt; the user's CLAUDE.md files
+ * still load through `settingSources`. A Helix participant gets its role
+ * instructions last, and a Builder none of the subagent guidance.
+ */
 export const buildEmbeddedClaudeSystemPromptAppend = (
   gatewayControlAvailable: boolean,
   enableComputerControl = false,
+  helixRole?: ProviderHelixRoleContext,
 ) =>
   [
     "You are running inside Synara, a coding app that embeds the Claude Agent SDK.",
     "Do not present the host app as Claude Code unless the user is explicitly asking about Claude Code.",
     "Treat the current working directory as the active workspace for the task.",
     "When the user asks about the current project, codebase, or repository, proactively inspect files in the current working directory before asking the user where to look.",
-    "When spawning subagents, set the Agent tool's `model` parameter and pick reasoning effort by choosing a worker-<tier> subagent type (worker-low, worker-medium, worker-high, worker-xhigh).",
-    "Honor explicit user instructions about a subagent's model or effort verbatim; otherwise match task complexity: mechanical work → haiku or worker-low, standard work → sonnet or worker-medium, hard reasoning → opus or fable with worker-high and above.",
+    ...(helixRole?.role === "builder" ? [] : CLAUDE_SUBAGENT_GUIDANCE),
+    ...(helixRole?.role === "lead" ? [CLAUDE_HELIX_LEAD_SUBAGENT_GUIDANCE] : []),
     renderSynaraHarnessPolicy({
       gatewayControlAvailable,
       enableComputerControl,
       automationAuthoring: "tool-descriptions",
+      ...(helixRole ? { helixRole: helixRole.role } : {}),
     }),
+    ...(helixRole ? ["", helixRole.instructions] : []),
   ].join("\n");
 
 const CLAUDE_WORKER_EFFORT_TIERS = ["low", "medium", "high", "xhigh"] as const;
@@ -1613,8 +1647,15 @@ function claudeSubagentSteerContext(message: string): string {
   return `The user sent you a message mid-task: ${message}. Address it and adjust your work accordingly.`;
 }
 
-function buildClaudeSdkSubagents(): Record<string, AgentDefinition> {
+function buildClaudeSdkSubagents(
+  helixRole?: ProviderHelixRoleContext,
+): Record<string, AgentDefinition> {
   const agents: Record<string, AgentDefinition> = {};
+  // A Builder has no Agent tool, so it gets no Synara agent definitions either.
+  if (helixRole?.role === "builder") return agents;
+  // A Lead's sub-agents share its gateway bearer: keep the Helix tools out of
+  // their context so none can delegate or review as the Lead.
+  const helixDisallowed = helixRole?.role === "lead" ? CLAUDE_HELIX_TOOL_NAMES : [];
 
   for (const alias of getAgentMentionAliases("claudeAgent")) {
     if (alias.kind !== "claude-subagent" || agents[alias.agentName]) {
@@ -1625,7 +1666,9 @@ function buildClaudeSdkSubagents(): Record<string, AgentDefinition> {
       description: alias.description,
       prompt: alias.prompt,
       ...(alias.tools ? { tools: [...alias.tools] } : {}),
-      ...(alias.disallowedTools ? { disallowedTools: [...alias.disallowedTools] } : {}),
+      ...(alias.disallowedTools || helixDisallowed.length > 0
+        ? { disallowedTools: [...(alias.disallowedTools ?? []), ...helixDisallowed] }
+        : {}),
       ...(alias.model ? { model: alias.model } : {}),
     };
   }
@@ -1642,6 +1685,7 @@ function buildClaudeSdkSubagents(): Record<string, AgentDefinition> {
       description: `General-purpose worker at ${tier} reasoning effort; choose per task complexity`,
       prompt: CLAUDE_WORKER_PROMPT,
       effort: tier,
+      ...(helixDisallowed.length > 0 ? { disallowedTools: [...helixDisallowed] } : {}),
     };
   }
 
@@ -7092,6 +7136,24 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         // turns). Hook input `agent_id` equals the run's task_id. It fires on
         // every tool call, so the no-steer path must stay trivial; queued
         // messages are drained on the subagent's next tool call.
+        // Hooks run in every permission mode, including bypassPermissions and
+        // calls a settings allow rule would never send to canUseTool, so this
+        // is what keeps a participant's sub-agents off its Helix tools.
+        const helixSubagentToolHook = async (hookInput: HookInput): Promise<HookJSONOutput> =>
+          hookInput.hook_event_name === "PreToolUse" &&
+          isHelixToolCallFromSubagent({
+            helixRole: input.helixRole,
+            fromSubagent: typeof hookInput.agent_id === "string",
+            toolName: hookInput.tool_name,
+          })
+            ? {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason: CLAUDE_HELIX_SUBAGENT_DENIAL,
+                },
+              }
+            : {};
         const subagentSteerHook = async (hookInput: HookInput): Promise<HookJSONOutput> => {
           const agentId = "agent_id" in hookInput ? hookInput.agent_id : undefined;
           if (pendingSubagentSteers.size === 0 || typeof agentId !== "string") {
@@ -7167,6 +7229,19 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 } satisfies PermissionResult;
               }
 
+              if (
+                isHelixToolCallFromSubagent({
+                  helixRole: input.helixRole,
+                  fromSubagent: callbackOptions.agentID !== undefined,
+                  toolName,
+                })
+              ) {
+                return {
+                  behavior: "deny",
+                  message: CLAUDE_HELIX_SUBAGENT_DENIAL,
+                } satisfies PermissionResult;
+              }
+
               const runtimeMode = input.runtimeMode ?? "full-access";
               const interactionTurnId =
                 context.turnState?.turnId ??
@@ -7190,12 +7265,20 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               // A group coordinator (and any other gateway-only principal the
               // orchestrator trusts) must not stall its turn on interactive
               // approval for its own Synara group tools — the gateway already
-              // scopes and authorizes them server-side. File edits, shell, and
-              // every non-Synara tool keep the ordinary permission path.
+              // scopes and authorizes them server-side. A Helix participant
+              // gets only its own role's helix_* tools. File edits, shell, and
+              // every other tool keep the ordinary permission path; a user
+              // deny rule resolves before the SDK asks this callback.
               if (
-                input.autoApproveSynaraTools === true &&
                 context.gatewaySessionLease !== undefined &&
-                isSynaraGatewayToolName(toolName)
+                shouldAutoApproveGatewayToolForSession(
+                  {
+                    autoApproveSynaraTools: input.autoApproveSynaraTools,
+                    helixRole: input.helixRole,
+                    interactionMode: context.turnState?.interactionMode,
+                  },
+                  toolName,
+                )
               ) {
                 return {
                   behavior: "allow",
@@ -7415,7 +7498,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
         };
-        const claudeSubagents = buildClaudeSdkSubagents();
+        const helixRole = input.helixRole;
+        const claudeSubagents = buildClaudeSdkSubagents(helixRole);
         const { claudeSdkEnv, snapshotSupported } =
           preflight ?? (yield* resolveClaudeStartPreflight(input));
         const failedStartupProcessOwner = failedStartupProcessOwners.get(threadId);
@@ -7451,15 +7535,24 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             append: buildEmbeddedClaudeSystemPromptAppend(
               agentGatewayCredentials !== undefined,
               input.enableComputerControl === true,
+              helixRole,
             ),
             // Strip per-user dynamic sections (working directory, auto-memory
             // path) into the first user message so the cached system-prompt
             // prefix stays static across sessions and users. Tradeoff: that
             // context steers marginally less authoritatively from a user turn.
             excludeDynamicSections: true,
-            ...(snapshotSupported ? { snapshot: true } : {}),
+            // A recorded prompt ignores a later launch's `append` until
+            // compaction, so a chat that became a Helix Lead mid-conversation
+            // (or left Helix) would keep its old instructions on resume. Helix
+            // sessions render fresh on every request; the role text is
+            // deterministic, so the prefix still only changes with the CLI.
+            ...(helixRole ? { snapshot: false } : snapshotSupported ? { snapshot: true } : {}),
           },
           ...(Object.keys(claudeSubagents).length > 0 ? { agents: claudeSubagents } : {}),
+          ...(helixRole?.role === "builder"
+            ? { disallowedTools: [...CLAUDE_HELIX_BUILDER_DISALLOWED_TOOLS] }
+            : {}),
           // Only `max` effort is spawn-fixed; every other level rides in
           // `settings.effortLevel` so it can change live mid-session.
           ...(effectiveEffort === "max" ? { effort: "max" as const } : {}),
@@ -7479,7 +7572,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           forwardSubagentText: true,
           hooks: {
             SessionStart: [{ hooks: [sessionStartHook] }],
-            PreToolUse: [{ hooks: [subagentSteerHook] }],
+            PreToolUse: [
+              {
+                hooks: helixRole ? [helixSubagentToolHook, subagentSteerHook] : [subagentSteerHook],
+              },
+            ],
           },
           canUseTool,
           env: withClaudeArtifactOptIn(claudeSdkEnv, providerOptions?.enableArtifacts),

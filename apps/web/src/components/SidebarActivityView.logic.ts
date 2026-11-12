@@ -373,16 +373,27 @@ export type ActivityPriorityTier = "waiting" | "unread" | "working";
 
 // Read off the row's own status pill, so a row's tier and its glyph never disagree
 // and a dismissed pill leaves Priority the same way it leaves the row.
-const ACTIVITY_PRIORITY_TIER_BY_STATUS: Record<ThreadStatusPill["label"], ActivityPriorityTier> = {
+// A held Helix pair (paused or stopped) waits on nothing new, so it takes no tier.
+const ACTIVITY_PRIORITY_TIER_BY_STATUS: Record<
+  ThreadStatusPill["label"],
+  ActivityPriorityTier | null
+> = {
   "Pending Approval": "waiting",
   "Awaiting Input": "waiting",
   "Plan Ready": "waiting",
+  "Needs Attention": "waiting",
+  Uncertain: "waiting",
   Completed: "unread",
   Reminder: "unread",
   Working: "working",
   Connecting: "working",
   "Preparing worktree": "working",
   "In Background": "working",
+  Planning: "working",
+  Building: "working",
+  Reviewing: "working",
+  Paused: null,
+  Stopped: null,
 };
 
 const ACTIVITY_PRIORITY_TIER_RANK: Record<ActivityPriorityTier, number> = {

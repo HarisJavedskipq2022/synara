@@ -15,6 +15,7 @@ import {
   ThreadId,
   WS_CHANNELS,
   WS_METHODS,
+  HELIX_WS_METHODS,
   WS_COMPATIBILITY_QUERY,
   WS_NEGOTIATE_QUERY,
   WS_PROTOCOL_EPOCH,
@@ -57,6 +58,7 @@ import {
   shouldReconnectAfterStreamFailure,
   threadStreamInputsEqual,
   projectFileChangeStreamKey,
+  helixEventStreamKey,
   WsTransport,
   RemoteConnectionUnavailableError,
   WsTransportRequestInterruptedError,
@@ -256,6 +258,8 @@ function makeBareTransport(): {
     threadSubscriptions: new Map(),
     projectFileSubscriptions: new Map(),
     projectAgentSubscriptions: new Map(),
+    helixSubscriptions: new Map(),
+    helixEventListeners: new Set(),
     threadStreamFailureListeners: new Set(),
     shellStreamFailureListeners: new Set(),
     disposed: false,
@@ -2979,6 +2983,39 @@ describe("WsTransport", () => {
     expect(internals.projectAgentSubscriptions.has(projectId)).toBe(false);
   });
 
+  it("keys Helix streams by Lead scope and drops a scope unsubscribed during the connect wait", async () => {
+    const { transport, internals } = makeBareTransport();
+    const client = {};
+    const clientResolvers: Array<(client: unknown) => void> = [];
+    const startHelixEventStream = vi.fn();
+    Object.assign(internals, {
+      getClient: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            clientResolvers.push(resolve);
+          }),
+      ),
+      startHelixEventStream,
+    });
+    const helix = internals as unknown as { helixSubscriptions: Map<string, unknown> };
+
+    const global = transport.request(HELIX_WS_METHODS.subscribe, {});
+    const scoped = transport.request(HELIX_WS_METHODS.subscribe, { leadThreadId: "lead-1" });
+    await vi.waitFor(() => expect(helix.helixSubscriptions.size).toBe(2));
+    expect([...helix.helixSubscriptions.keys()].toSorted()).toEqual([
+      helixEventStreamKey(undefined),
+      helixEventStreamKey("lead-1"),
+    ]);
+    await transport.unsubscribeHelixEvents("lead-1");
+
+    for (const resolve of clientResolvers) resolve(client);
+    await global;
+    await scoped;
+
+    expect(startHelixEventStream).toHaveBeenCalledExactlyOnceWith(client, "helix.events:*", {});
+    expect([...helix.helixSubscriptions.keys()]).toEqual(["helix.events:*"]);
+  });
+
   it("starts only the newest registered project-agent subscription after the connect wait", async () => {
     const { transport, internals } = makeBareTransport();
     const client = {};
@@ -3101,6 +3138,7 @@ describe("WsTransport", () => {
         threadSubscriptions: new Map([[threadId, input]]),
         projectFileSubscriptions: new Map([[fileKey, watchedFile]]),
         projectAgentSubscriptions: new Map(),
+        helixSubscriptions: new Map(),
         startProjectFileChangeStream,
         runtime: null,
         clientScope: null,

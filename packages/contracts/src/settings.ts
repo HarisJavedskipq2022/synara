@@ -160,6 +160,9 @@ export const ServerSettings = Schema.Struct({
   autoResumeAfterUsageLimits: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
   // Server-owned epoch: disabling invalidates pending waits across a rapid re-enable/restart.
   usageLimitRecoveryEpoch: NonNegativeInt.pipe(Schema.withDecodingDefault(() => 0)),
+  // Helix Lead/Builder pairs (docs/plans/helix-prototype.md). Off by default; while
+  // off, helix.* mutations are refused and no Lead receives the Helix tools.
+  enableHelix: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(() => true)),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(() => true)),
   keepAwakeMode: KeepAwakeMode.pipe(Schema.withDecodingDefault(() => DEFAULT_KEEP_AWAKE_MODE)),
@@ -229,6 +232,7 @@ const ProviderSettingsBasePatch = {
 
 export const ServerSettingsPatch = Schema.Struct({
   autoResumeAfterUsageLimits: Schema.optionalKey(Schema.Boolean),
+  enableHelix: Schema.optionalKey(Schema.Boolean),
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   keepAwakeMode: Schema.optionalKey(KeepAwakeMode),

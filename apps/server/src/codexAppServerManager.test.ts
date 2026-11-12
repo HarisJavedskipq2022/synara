@@ -23,8 +23,10 @@ import {
   ApprovalRequestId,
   BROWSER_TOOL_NAMES,
   DEFAULT_MODEL_BY_PROVIDER,
+  HelixPairId,
   ThreadId,
   TurnId,
+  type ProviderHelixRoleContext,
   type RuntimeMode,
 } from "@synara/contracts";
 
@@ -37,6 +39,7 @@ import {
 } from "./codexProcessEnv";
 import {
   buildCodexCollaborationMode,
+  buildCodexHelixDeveloperInstructions,
   buildCodexThreadOpenRequest,
   resolveCodexThreadOpenMinimumVersion,
   shouldWarnCodexFreshStartWithoutResume,
@@ -51,7 +54,9 @@ import {
   normalizeCodexModelSlug,
   readCodexAccountSnapshot,
   resolveCodexModelForAccount,
+  withCodexHelixThreadConfig,
 } from "./codexAppServerManager";
+import { HELIX_ROLE_PROMPT_VERSION, renderHelixRoleInstructions } from "./helix/rolePrompts.ts";
 import { formatMissingCodexWorkingDirectoryError } from "./codexWorkingDirectory";
 import {
   CodexAppServerTransportError,
@@ -86,6 +91,7 @@ function createSyntheticCodexAppServer(options?: {
   readonly projectMcpServers?: Record<string, unknown>;
   readonly forceFullHistoryResponse?: boolean;
   readonly pluginListFrameBytes?: number;
+  readonly account?: Record<string, unknown>;
   readonly gatewayRenewal?:
     | "supported"
     | "unsupported"
@@ -157,7 +163,7 @@ function createSyntheticCodexAppServer(options?: {
         if (request.method === "initialize") {
           respond({});
         } else if (request.method === "account/read") {
-          respond({ account: { type: "apiKey" } });
+          respond({ account: options?.account ?? { type: "apiKey" } });
         } else if (request.method === "thread/unsubscribe") {
           if (options?.gatewayRenewal === "unsupported") {
             queueMicrotask(() =>
@@ -5301,6 +5307,11 @@ describe("respondToRequest", () => {
   });
 });
 
+const helixAcceptedReply = (id: number) => ({
+  id,
+  result: { action: "accept", content: null, _meta: null },
+});
+
 describe("MCP tool call elicitation approvals", () => {
   const approvalParams = (persist: ReadonlyArray<string> | string = ["session"]) => ({
     threadId: "provider_parent",
@@ -5418,6 +5429,97 @@ describe("MCP tool call elicitation approvals", () => {
     });
     expect(context.pendingApprovals.size).toBe(1);
     expect(writeMessage).not.toHaveBeenCalled();
+  });
+
+  describe("Helix participants in approval-required mode", () => {
+    const roleContext = (role: "lead" | "builder"): ProviderHelixRoleContext => ({
+      role,
+      pairId: HelixPairId.makeUnsafe("helix-pair:approvals"),
+      promptVersion: HELIX_ROLE_PROMPT_VERSION,
+      instructions: renderHelixRoleInstructions(role),
+    });
+    const toolRequest = (id: number, toolName: string, viaMessage = false) => {
+      const params = approvalParams();
+      if (viaMessage) {
+        const { tool_name: _toolName, ...meta } = params._meta;
+        return {
+          id,
+          method: "mcpServer/elicitation/request",
+          params: {
+            ...params,
+            message: `Allow the synara MCP server to run tool "${toolName}"?`,
+            _meta: meta,
+          },
+        };
+      }
+      params._meta.tool_name = toolName;
+      return { id, method: "mcpServer/elicitation/request", params };
+    };
+
+    it.each([
+      ["lead", "helix_delegate", false],
+      ["lead", "helix_review", true],
+      ["lead", "helix_wait", false],
+      ["lead", "helix_inspect", false],
+      ["builder", "helix_report", false],
+      ["builder", "helix_report", true],
+    ] as const)(
+      "accepts a %s's own %s without a prompt (message form: %s)",
+      async (role, tool, viaMessage) => {
+        const { manager, context, emitEvent, writeMessage } = computerApprovalHarness();
+        Object.assign(context, { helixRole: roleContext(role) });
+        await handleServerRequestForTest(manager, context, toolRequest(80, tool, viaMessage));
+        expect(writeMessage).toHaveBeenCalledWith(context, helixAcceptedReply(80));
+        expect(context.pendingApprovals.size).toBe(0);
+        expect(emitEvent).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["lead", "synara_set_thread_pull_request"],
+      ["lead", "synara_create_thread"],
+      ["lead", "helix_report"],
+      ["builder", "helix_delegate"],
+      ["builder", "synara_set_thread_pull_request"],
+    ] as const)("keeps a %s's %s on the prompt path", async (role, tool) => {
+      const { manager, context, writeMessage } = computerApprovalHarness();
+      Object.assign(context, { helixRole: roleContext(role) });
+      await handleServerRequestForTest(manager, context, toolRequest(81, tool));
+      expect(context.pendingApprovals.size).toBe(1);
+      expect(writeMessage).not.toHaveBeenCalled();
+    });
+
+    it("keeps a Lead's native command approval on the prompt path", async () => {
+      const { manager, context, writeMessage } = computerApprovalHarness();
+      Object.assign(context, { helixRole: roleContext("lead") });
+      await handleServerRequestForTest(manager, context, {
+        id: 82,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "provider_parent",
+          turnId: "turn_mcp",
+          itemId: "call_native",
+          command: "rm -rf build",
+        },
+      });
+      expect(context.pendingApprovals.size).toBe(1);
+      expect(writeMessage).not.toHaveBeenCalled();
+    });
+
+    it("keeps helix_* on the prompt path for an ordinary session", async () => {
+      const { manager, context, writeMessage } = computerApprovalHarness();
+      await handleServerRequestForTest(manager, context, toolRequest(83, "helix_delegate"));
+      expect(context.pendingApprovals.size).toBe(1);
+      expect(writeMessage).not.toHaveBeenCalled();
+    });
+
+    it("keeps a Lead in plan mode on the prompt path", async () => {
+      const { manager, context, writeMessage } = computerApprovalHarness();
+      Object.assign(context, { helixRole: roleContext("lead"), activeInteractionMode: "plan" });
+      await handleServerRequestForTest(manager, context, toolRequest(84, "helix_delegate"));
+      expect(context.pendingApprovals.size).toBe(1);
+      expect(writeMessage).not.toHaveBeenCalled();
+    });
   });
 
   it("delegates exact active Synara Computer calls to gateway consent without persistent permission", async () => {
@@ -7437,5 +7539,325 @@ describe("collab child routing after the parent turn ends", () => {
     expect(harness.context.collabReceiverTurns.size).toBeLessThanOrEqual(200);
     expect(harness.context.collabReceiverParents.has("child_provider_249")).toBe(true);
     expect(harness.context.collabReceiverParents.has("child_provider_0")).toBe(false);
+  });
+});
+
+const developerInstructionsOf = (request: SyntheticCodexRequest | undefined) =>
+  String(
+    (request?.params?.collaborationMode as { settings?: { developer_instructions?: unknown } })
+      ?.settings?.developer_instructions ?? "",
+  );
+
+describe("Helix role sessions", () => {
+  const helixRole = (role: "lead" | "builder"): ProviderHelixRoleContext => ({
+    role,
+    pairId: HelixPairId.makeUnsafe("helix-pair:test"),
+    promptVersion: HELIX_ROLE_PROMPT_VERSION,
+    instructions: renderHelixRoleInstructions(role, { builderThreadId: "thread-builder" }),
+  });
+  const endpoint = "http://127.0.0.1:48123/mcp";
+  let leaseSequence = 0;
+  const gateway = {
+    endpointUrl: () => endpoint,
+    acquireSessionLease: (
+      threadId: ThreadId,
+      input?: Parameters<typeof acquireAgentGatewaySessionLease>[3],
+    ) =>
+      acquireAgentGatewaySessionLease(
+        {
+          connectionForThread: () => ({ url: endpoint, bearerToken: `lease-${++leaseSequence}` }),
+          revokeSessionToken: () => {},
+        },
+        threadId,
+        "codex",
+        input ?? AGENT_GATEWAY_NO_CAPABILITIES,
+      )!,
+  };
+  async function withManager(
+    run: (input: {
+      readonly fake: ReturnType<typeof createSyntheticCodexAppServer>;
+      readonly manager: CodexAppServerManager;
+      readonly cwd: string;
+    }) => Promise<void>,
+    options?: Parameters<typeof createSyntheticCodexAppServer>[0],
+  ) {
+    const fake = createSyntheticCodexAppServer(options);
+    const { manager } = createSyntheticCodexManager(fake, undefined, gateway);
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-helix-"));
+    try {
+      await run({ fake, manager, cwd });
+    } finally {
+      await manager.stopAll();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+
+  it("carries a Builder's instructions on every turn, including one with no interaction mode", () =>
+    withManager(async ({ fake, manager, cwd }) => {
+      const builder = helixRole("builder");
+      const threadId = asThreadId("helix-builder");
+      await manager.startSession({
+        threadId,
+        provider: "codex",
+        cwd,
+        runtimeMode: "full-access",
+        model: "gpt-5.5",
+        helixRole: builder,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      await manager.sendTurn({ threadId, input: "first brief" });
+      await manager.sendTurn({ threadId, input: "second brief", interactionMode: "default" });
+
+      const turns = fake.requests.filter((request) => request.method === "turn/start");
+      expect(turns).toHaveLength(2);
+      const [first = "", second] = turns.map(developerInstructionsOf);
+      expect(first).toBe(second);
+      expect(first.split(builder.instructions)).toHaveLength(2);
+      expect(first.endsWith(builder.instructions)).toBe(true);
+      // The mode block stays; tools the Builder's credential lacks are not offered.
+      expect(first).toContain("<collaboration_mode># Collaboration Mode: Default");
+      expect(first).toContain(SYNARA_HARNESS_POLICY_MARKER);
+      expect(first).not.toContain("synara_");
+      expect(first).not.toContain("mcp__synara__browser_");
+      for (const turn of turns) {
+        expect(turn.params?.collaborationMode).toMatchObject({
+          mode: "default",
+          settings: { model: "gpt-5.5", reasoning_effort: null },
+        });
+      }
+      // Native multi-agent tools are off for the Builder, merged over the user's config.
+      const start = fake.requests.find((request) => request.method === "thread/start");
+      expect(start?.params?.config).toMatchObject({
+        mcp_servers: { synara: { url: endpoint } },
+        features: { multi_agent: false },
+      });
+    }));
+
+  it("re-applies the role on resume, keeps a turn's last mode and never doubles the text", () =>
+    withManager(async ({ fake, manager, cwd }) => {
+      const builder = helixRole("builder");
+      const threadId = asThreadId("helix-builder-resume");
+      await manager.startSession({
+        threadId,
+        provider: "codex",
+        cwd,
+        runtimeMode: "full-access",
+        model: "gpt-5.5",
+        helixRole: builder,
+        resumeCursor: { threadId: "provider-thread" },
+        expectedCodexContinuationGeneration: SYNTHETIC_CONTINUATION_GENERATION,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      await manager.sendTurn({
+        threadId,
+        input: "plan it",
+        interactionMode: "plan",
+        effort: "high",
+      });
+      await manager.sendTurn({ threadId, input: "follow-up" });
+
+      const resume = fake.requests.find((request) => request.method === "thread/resume");
+      expect(resume?.params).toMatchObject({
+        threadId: "provider-thread",
+        config: { features: { multi_agent: false } },
+      });
+      const turns = fake.requests.filter((request) => request.method === "turn/start");
+      expect(turns.map((turn) => turn.params?.collaborationMode)).toMatchObject([
+        { mode: "plan", settings: { reasoning_effort: "high" } },
+        { mode: "plan", settings: { reasoning_effort: null } },
+      ]);
+      for (const turn of turns) {
+        const instructions = developerInstructionsOf(turn);
+        expect(instructions).toContain("<collaboration_mode># Plan Mode");
+        expect(instructions.split(builder.instructions)).toHaveLength(2);
+      }
+    }));
+
+  it("keeps a Lead's tools and browser routing, adds its role and turns native children off", () =>
+    withManager(async ({ fake, manager, cwd }) => {
+      const lead = helixRole("lead");
+      const threadId = asThreadId("helix-lead");
+      await manager.startSession({
+        threadId,
+        provider: "codex",
+        cwd,
+        runtimeMode: "full-access",
+        model: "gpt-5.5",
+        helixRole: lead,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      await manager.sendTurn({ threadId, input: "plan the work" });
+
+      const instructions = developerInstructionsOf(
+        fake.requests.find((request) => request.method === "turn/start"),
+      );
+      expect(instructions.split(lead.instructions)).toHaveLength(2);
+      expect(instructions).toContain("Use the synara_* tools");
+      expect(instructions).toContain("This thread is a Helix Lead");
+      expect(instructions).toContain("## Browser tool routing");
+      const start = fake.requests.find((request) => request.method === "thread/start");
+      // A Lead's children would share its bearer, so its native multi-agent tools are off too.
+      expect(start?.params?.config).toMatchObject({ features: { multi_agent: false } });
+    }));
+
+  it("keeps a Builder's restrictions and instructions across an in-place credential renewal", async () => {
+    const fake = createSyntheticCodexAppServer({ gatewayRenewal: "supported" });
+    const { manager } = createSyntheticCodexManager(fake, undefined, {
+      endpointUrl: () => endpoint,
+      acquireSessionLease: (threadId, input) =>
+        acquireAgentGatewaySessionLease(
+          {
+            connectionForThread: () => ({ url: endpoint, bearerToken: `lease-${++leaseSequence}` }),
+            revokeSessionToken: () => {},
+            retireSessionTurn: () => Promise.resolve(),
+          },
+          threadId,
+          "codex",
+          input ?? AGENT_GATEWAY_NO_CAPABILITIES,
+        )!,
+    });
+    const builder = helixRole("builder");
+    const threadId = asThreadId("helix-builder-renew");
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-helix-renew-"));
+    try {
+      await manager.startSession({
+        threadId,
+        provider: "codex",
+        cwd,
+        runtimeMode: "full-access",
+        model: "gpt-5.5",
+        helixRole: builder,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      const first = await manager.sendTurn({ threadId, input: "first brief" });
+      fake.children[0]!.stdout.emit(
+        "data",
+        Buffer.from(
+          `${JSON.stringify({
+            method: "turn/completed",
+            params: {
+              threadId: "fresh-provider-thread",
+              turn: { id: first.turnId, status: "completed" },
+            },
+          })}\n`,
+        ),
+      );
+      expect(await manager.renewAgentGatewayCredential(threadId)).toBe(true);
+      await manager.sendTurn({ threadId, input: "second brief" });
+
+      const resume = fake.requests.find((request) => request.method === "thread/resume");
+      expect(resume?.params?.config).toMatchObject({
+        mcp_servers: { synara: { url: endpoint } },
+        features: { multi_agent: false },
+      });
+      const turns = fake.requests.filter((request) => request.method === "turn/start");
+      expect(turns).toHaveLength(2);
+      expect(developerInstructionsOf(turns[1])).toBe(developerInstructionsOf(turns[0]));
+      expect(developerInstructionsOf(turns[1]).split(builder.instructions)).toHaveLength(2);
+    } finally {
+      await manager.stopAll();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses Spark for a Helix session the account cannot use instead of switching models", () =>
+    withManager(
+      async ({ fake, manager, cwd }) => {
+        await expect(
+          manager.startSession({
+            threadId: asThreadId("helix-spark"),
+            provider: "codex",
+            cwd,
+            runtimeMode: "full-access",
+            model: "gpt-5.3-codex-spark",
+            helixRole: helixRole("builder"),
+            agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+          }),
+        ).rejects.toThrow(/gpt-5\.3-codex-spark.*plus plan.*does not switch models/);
+        expect(fake.requests.some((request) => request.method === "thread/start")).toBe(false);
+      },
+      { account: { type: "chatgpt", planType: "plus" } },
+    ));
+
+  it("still falls back from Spark for an ordinary session on the same account", () =>
+    withManager(
+      async ({ fake, manager, cwd }) => {
+        await manager.startSession({
+          threadId: asThreadId("ordinary-spark"),
+          provider: "codex",
+          cwd,
+          runtimeMode: "full-access",
+          model: "gpt-5.3-codex-spark",
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        });
+        const start = fake.requests.find((request) => request.method === "thread/start");
+        expect(start?.params?.model).toBe(DEFAULT_MODEL_BY_PROVIDER.codex);
+      },
+      { account: { type: "chatgpt", planType: "plus" } },
+    ));
+
+  it("records the kept mode for a Helix turn without one", async () => {
+    const { manager, context } = createSendTurnHarness("approval-required");
+    Object.assign(context, { helixRole: helixRole("lead"), helixCollaborationMode: "plan" });
+    await manager.sendTurn({ threadId: asThreadId("thread_1"), input: "go on" });
+    expect((context as { activeInteractionMode?: string }).activeInteractionMode).toBe("plan");
+  });
+
+  it("refuses a Helix turn that would need a substituted model", async () => {
+    const { manager, context, sendRequest } = createSendTurnHarness();
+    Object.assign(context, {
+      helixRole: helixRole("builder"),
+      account: { type: "chatgpt", planType: "plus", sparkEnabled: false },
+    });
+    await expect(
+      manager.sendTurn({
+        threadId: asThreadId("thread_1"),
+        input: "go",
+        model: "gpt-5.3-codex-spark",
+      }),
+    ).rejects.toThrow(/does not switch models/);
+    context.session.model = undefined as unknown as string;
+    await expect(
+      manager.sendTurn({ threadId: asThreadId("thread_1"), input: "go" }),
+    ).rejects.toThrow(/no Codex model selected/);
+    expect(sendRequest).not.toHaveBeenCalled();
+  });
+
+  it("leaves ordinary collaboration modes and thread config unchanged", () => {
+    expect(buildCodexCollaborationMode({})).toBeUndefined();
+    expect(buildCodexCollaborationMode({ interactionMode: "default" })).toEqual({
+      mode: "default",
+      settings: {
+        model: "gpt-5.3-codex",
+        reasoning_effort: "medium",
+        developer_instructions: CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
+      },
+    });
+    const config = { mcp_servers: {} };
+    expect(withCodexHelixThreadConfig(config, undefined)).toBe(config);
+    expect(withCodexHelixThreadConfig(undefined, undefined)).toBeUndefined();
+    expect(withCodexHelixThreadConfig(config, helixRole("lead"))).toEqual({
+      mcp_servers: {},
+      features: { multi_agent: false },
+    });
+    expect(withCodexHelixThreadConfig(undefined, helixRole("builder"))).toEqual({
+      features: { multi_agent: false },
+    });
+  });
+
+  it("composes the same Helix developer instructions for the same mode", () => {
+    const builder = helixRole("builder");
+    const plan = buildCodexHelixDeveloperInstructions({ helixRole: builder, mode: "plan" });
+    expect(plan).toBe(buildCodexHelixDeveloperInstructions({ helixRole: builder, mode: "plan" }));
+    expect(
+      plan.startsWith(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS.split("</collaboration_mode>")[0]!),
+    ).toBe(true);
+    expect(
+      buildCodexHelixDeveloperInstructions({
+        helixRole: builder,
+        mode: "default",
+        enableComputerControl: true,
+      }),
+    ).not.toContain("## Synara computer use");
   });
 });

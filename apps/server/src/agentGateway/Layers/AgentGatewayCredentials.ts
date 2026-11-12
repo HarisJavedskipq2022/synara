@@ -83,6 +83,8 @@ export function makeAgentGatewayStdioBootstrapRegistry(input: {
  */
 export function makeAgentGatewayConnectorRegistry(input: {
   readonly sessionIsActive: (token: string) => boolean;
+  /** A session whose role withholds connectors (a Helix Builder) is granted and may use none. */
+  readonly sessionWithholdsConnectors?: (token: string) => boolean;
 }) {
   let registrations: ReadonlyArray<AgentGatewayConnectorRegistration> = [];
   const grants = new Map<string, ReadonlySet<string>>();
@@ -95,14 +97,20 @@ export function makeAgentGatewayConnectorRegistry(input: {
       token: string,
       provider: ProviderKind,
     ): ReadonlyArray<AgentGatewayConnectorRegistration> => {
-      const granted = providerSupportsMcpConnectors(provider) ? registrations : [];
+      const granted =
+        providerSupportsMcpConnectors(provider) &&
+        input.sessionWithholdsConnectors?.(token) !== true
+          ? registrations
+          : [];
       if (granted.length > 0) {
         grants.set(token, new Set(granted.map((registration) => registration.connectorId)));
       }
       return granted;
     },
     canUse: (token: string, connectorId: string): boolean =>
-      input.sessionIsActive(token) && (grants.get(token)?.has(connectorId) ?? false),
+      input.sessionIsActive(token) &&
+      input.sessionWithholdsConnectors?.(token) !== true &&
+      (grants.get(token)?.has(connectorId) ?? false),
     revokeSession: (token: string) => {
       grants.delete(token);
     },
@@ -148,6 +156,11 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
 
   const connectors = makeAgentGatewayConnectorRegistry({
     sessionIsActive: (token) => sessionRegistry.verify(token) !== null,
+    sessionWithholdsConnectors: (token) =>
+      // Builders and retired Builders get no MCP connectors.
+      ["helix_builder", "helix_retired"].includes(
+        sessionRegistry.verify(token)?.roleProfile?.kind ?? "",
+      ),
   });
 
   const issueSessionToken: AgentGatewayCredentialsShape["issueSessionToken"] = (
@@ -233,6 +246,8 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     },
     setConnectorServers: connectors.set,
     canUseConnector: connectors.canUse,
+    setThreadRoleProfile: sessionRegistry.setThreadRoleProfile,
+    getThreadRoleProfile: sessionRegistry.getThreadRoleProfile,
   } satisfies AgentGatewayCredentialsShape;
 });
 

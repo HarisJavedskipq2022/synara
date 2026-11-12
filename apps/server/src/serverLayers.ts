@@ -4,6 +4,9 @@ import { ProjectionThreadMessageRepositoryLive } from "./persistence/Layers/Proj
 import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts";
 import { QueuedTurnPromotionRepositoryLive } from "./persistence/Layers/QueuedTurnPromotions";
 import { HubWorkRepositoryLive } from "./persistence/Layers/HubWorkRepository";
+import { HelixRepositoryLive } from "./persistence/Layers/HelixRepository";
+import { HelixCoordinatorLive } from "./helix/Layers/HelixCoordinator";
+import { ProviderHelixRoleResolverLive } from "./provider/Services/ProviderHelixRoleResolver";
 import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAttachments";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
@@ -125,14 +128,6 @@ export function makeServerRuntimeServicesLayer(
   const managedAttachmentCleanupLayer = ManagedAttachmentCleanupLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
   );
-  const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
-    Layer.provideMerge(runtimeServicesLayer),
-    Layer.provideMerge(serverSettingsLayer),
-    Layer.provideMerge(GitCoreLive),
-    // Share the gateway/deletion manager; a sibling layer cannot satisfy optional services.
-    Layer.provideMerge(DeviceServiceLive),
-    Layer.provideMerge(ComputerServiceLive),
-  );
   const hubOutputReactorLayer = HubOutputReactorLive.pipe(Layer.provideMerge(runtimeServicesLayer));
   const threadGitMetadataReactorLayer = ThreadGitMetadataReactorLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
@@ -156,7 +151,37 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(serverSettingsLayer),
     Layer.provideMerge(providerHealthLayer),
   );
+  // Helix applies every stored participant's gateway role profile and
+  // reconciles unresolved handoffs while it is built. The provider command
+  // reactor and the gateway both depend on it, so neither runs first.
+  const helixLayer = HelixCoordinatorLive.pipe(
+    // The same instance the provider layer reads (makeServerApplicationLayers).
+    Layer.provideMerge(ProviderHelixRoleResolverLive),
+    Layer.provideMerge(HelixRepositoryLive),
+    Layer.provideMerge(agentGatewayCredentialsLayer),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        ProjectionTurnRepositoryLive,
+        OrchestrationCommandReceiptRepositoryLive,
+        OrchestrationEventDeliveryRepositoryLive,
+      ),
+    ),
+    Layer.provideMerge(projectAgentServiceLayer),
+    Layer.provideMerge(runtimeServicesLayer),
+    Layer.provideMerge(serverSettingsLayer),
+  );
+  const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
+    // Helix Builders are excluded from usage-limit recovery arming.
+    Layer.provideMerge(helixLayer),
+    Layer.provideMerge(runtimeServicesLayer),
+    Layer.provideMerge(serverSettingsLayer),
+    Layer.provideMerge(GitCoreLive),
+    // Share the gateway/deletion manager; a sibling layer cannot satisfy optional services.
+    Layer.provideMerge(DeviceServiceLive),
+    Layer.provideMerge(ComputerServiceLive),
+  );
   const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
+    Layer.provideMerge(helixLayer),
     Layer.provideMerge(runtimeServicesLayer),
     Layer.provideMerge(providerHealthLayer),
     Layer.provideMerge(OrchestrationEventDeliveryRepositoryLive),
@@ -262,7 +287,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(agentGatewayCredentialsLayer),
   );
   const agentGatewayLayer = AgentGatewayLive.pipe(
-    Layer.provideMerge(mcpConnectorsLayer),
+    Layer.provideMerge(Layer.mergeAll(helixLayer, mcpConnectorsLayer)),
     Layer.provideMerge(ServerEnvironmentLive),
     Layer.provideMerge(HostConnectionRegistryLive),
     Layer.provideMerge(
@@ -324,6 +349,7 @@ export function makeServerRuntimeServicesLayer(
 
   return Layer.mergeAll(
     agentGatewayCredentialsLayer,
+    // Also carries the Helix services and HelixRepository (provideMerge above).
     agentGatewayLayer,
     BrowserAutomationHostLive,
     automationServiceLayer,
@@ -392,6 +418,8 @@ export function makeServerApplicationLayers() {
   // single ServerSettings service instead of capturing private defaults.
   const providerLayer = makeServerProviderLayer({ agentGatewayCredentialsLayer }).pipe(
     Layer.provideMerge(ServerSettingsLive),
+    // One shared resolver: Helix registers its role lookup, ProviderService reads it.
+    Layer.provideMerge(ProviderHelixRoleResolverLive),
   );
   return {
     runtimeServicesLayer,

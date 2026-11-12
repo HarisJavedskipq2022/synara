@@ -44,6 +44,9 @@ import {
   WsCompatibilityError,
   WsFeatureRpcGroup,
   WsProjectAgentRpcGroup,
+  WsHelixRpcGroup,
+  HELIX_WS_METHODS,
+  type HelixStreamEvent,
   type AutomationStreamEvent,
   type TodoStreamEvent,
   type GitActionProgressEvent,
@@ -295,9 +298,19 @@ function awaitWithAbort<A>(promise: Promise<A>, signal: AbortSignal | undefined)
 // server is the authority that refuses them off darwin, and the pane needs a
 // real RPC error (or an `unsupported-platform` availability) to render its
 // blocked state. Merging here keeps one socket and one client.
+// Helix methods are carried on every client, like the device group; callers only
+// invoke them after the server advertises `helix.pairs` (see wsNativeApi).
 const makeRpcClient = RpcClient.make(
-  WsFeatureRpcGroup.merge(WsDeviceRpcGroup).merge(WsComputerRpcGroup).merge(WsProjectAgentRpcGroup),
+  WsFeatureRpcGroup.merge(WsDeviceRpcGroup)
+    .merge(WsComputerRpcGroup)
+    .merge(WsProjectAgentRpcGroup)
+    .merge(WsHelixRpcGroup),
 );
+
+/** Stream key for one `helix.subscribe` scope: a Lead thread, or `*` for pair events only. */
+export function helixEventStreamKey(leadThreadId: string | undefined): string {
+  return `helix.events:${leadThreadId ?? "*"}`;
+}
 const makeBootstrapRpcClient = RpcClient.make(WsBootstrapRpcGroup);
 const REQUEST_TIMEOUT_MS = 60_000;
 // Stream-backed actions hold no unary admission lease on the server.
@@ -1064,6 +1077,10 @@ export class WsTransport {
   private readonly threadSubscriptions = new Map<string, unknown>();
   private readonly projectFileSubscriptions = new Map<string, ProjectFileChangeSubscription>();
   private readonly projectAgentSubscriptions = new Map<string, unknown>();
+  // Keyed by `helixEventStreamKey`. Helix events have no push channel (an older
+  // client would fail to decode one), so they reach listeners directly.
+  private readonly helixSubscriptions = new Map<string, unknown>();
+  private readonly helixEventListeners = new Set<(event: HelixStreamEvent) => void>();
   private compatibility: WsBootstrapNegotiateResult | null = null;
   private compatibilityIssue: WsCompatibilityError | null = null;
   // Tracks the last server generation this transport observed so cross-restart
@@ -1215,6 +1232,21 @@ export class WsTransport {
           return undefined as T;
         }
         this.startProjectAgentEventStream(client, projectId, params);
+        return undefined as T;
+      }
+      if (method === HELIX_WS_METHODS.subscribe) {
+        const streamKey = helixEventStreamKey(
+          (params as { leadThreadId?: string } | undefined)?.leadThreadId,
+        );
+        this.resetStreamCapacityRetry(streamKey);
+        this.resetStreamCompletionRetry(streamKey);
+        const input = params ?? {};
+        this.helixSubscriptions.set(streamKey, input);
+        const client = await awaitWithAbort(this.getClient(), abortScope.signal);
+        if (this.helixSubscriptions.get(streamKey) !== input) {
+          return undefined as T;
+        }
+        this.startHelixEventStream(client, streamKey, input);
         return undefined as T;
       }
 
@@ -1602,6 +1634,8 @@ export class WsTransport {
     this.activeThreadStreamInputs.clear();
     this.projectFileSubscriptions.clear();
     this.projectAgentSubscriptions.clear();
+    this.helixSubscriptions.clear();
+    this.helixEventListeners.clear();
     this.threadStreamFailureListeners.clear();
     this.shellStreamFailureListeners.clear();
     this.currentFeatureSession = null;
@@ -2264,6 +2298,9 @@ export class WsTransport {
         for (const [projectId, params] of this.projectAgentSubscriptions) {
           this.startProjectAgentEventStream(client, projectId, params);
         }
+        for (const [streamKey, params] of this.helixSubscriptions) {
+          this.startHelixEventStream(client, streamKey, params);
+        }
         // A completed probe and stream restore reset connection backoff even
         // when a close lands at this final boundary. The separate defect budget
         // still requires a successful application RPC from a healthy runtime.
@@ -2901,6 +2938,45 @@ export class WsTransport {
         void this.getClient().then((nextClient) => {
           if (!this.projectAgentSubscriptions.has(projectId)) return;
           this.startProjectAgentEventStream(nextClient, projectId, params);
+        });
+      },
+    );
+  }
+
+  /** Helix stream events, delivered without a push channel. */
+  onHelixEvent(listener: (event: HelixStreamEvent) => void): () => void {
+    this.helixEventListeners.add(listener);
+    return () => {
+      this.helixEventListeners.delete(listener);
+    };
+  }
+
+  /** Drop one `helix.subscribe` scope and cancel its live stream. */
+  async unsubscribeHelixEvents(leadThreadId: string | undefined): Promise<void> {
+    const streamKey = helixEventStreamKey(leadThreadId);
+    this.helixSubscriptions.delete(streamKey);
+    await this.stopStream(streamKey);
+  }
+
+  private startHelixEventStream(client: RpcClientInstance, streamKey: string, params: unknown) {
+    this.startStream<HelixStreamEvent>(
+      client,
+      streamKey,
+      client[HELIX_WS_METHODS.subscribe](params as never),
+      (event) => {
+        for (const listener of this.helixEventListeners) {
+          try {
+            listener(event);
+          } catch {
+            // A listener must not break the stream.
+          }
+        }
+      },
+      () => {
+        if (!this.helixSubscriptions.has(streamKey)) return;
+        void this.getClient().then((nextClient) => {
+          if (this.helixSubscriptions.get(streamKey) !== params) return;
+          this.startHelixEventStream(nextClient, streamKey, params);
         });
       },
     );

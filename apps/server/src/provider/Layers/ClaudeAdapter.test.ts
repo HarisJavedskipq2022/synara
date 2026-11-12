@@ -17,10 +17,12 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
+  HelixPairId,
   ProviderItemId,
   ProviderRuntimeEvent,
   ThreadId,
   TurnId,
+  type ProviderHelixRoleContext,
 } from "@synara/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { assessClaudeCache } from "@synara/shared/claudeCache";
@@ -58,12 +60,15 @@ import {
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
   buildEmbeddedClaudeSystemPromptAppend,
+  CLAUDE_HELIX_BUILDER_DISALLOWED_TOOLS,
   claudeHomeEnvironment,
   makeClaudeAdapterLive as makeClaudeAdapterLiveBase,
   type ClaudeAdapterLiveOptions,
   type ClaudeOwnedProcess,
 } from "./ClaudeAdapter.ts";
 import { claudeIsolatedHomePath } from "../claudeEnvironment.ts";
+import { HELIX_ROLE_PROMPT_VERSION, renderHelixRoleInstructions } from "../../helix/rolePrompts.ts";
+import { CLAUDE_HELIX_TOOL_NAMES } from "../helixToolApproval.ts";
 
 vi.mock("effect", async (importOriginal) => {
   const actual = await importOriginal<typeof import("effect")>();
@@ -17041,3 +17046,447 @@ it.effect(
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   },
 );
+
+const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
+const helixPermissionOptions = (id: string) => ({
+  signal: new AbortController().signal,
+  toolUseID: `tool-use-${id}`,
+  requestId: `request-${id}`,
+});
+
+describe("Helix role sessions", () => {
+  const helixRole = (role: "lead" | "builder"): ProviderHelixRoleContext => ({
+    role,
+    pairId: HelixPairId.makeUnsafe("helix-pair:test"),
+    promptVersion: HELIX_ROLE_PROMPT_VERSION,
+    instructions: renderHelixRoleInstructions(role, { builderThreadId: "thread-builder" }),
+  });
+
+  function makeHelixHarness(cliVersion = MINIMUM_CLAUDE_AUTO_MODE_CLI_VERSION) {
+    const gateway = makeGatewayCredentialsHarness();
+    const createInputs: Array<{ readonly options: ClaudeQueryOptions }> = [];
+    const layer = makeClaudeAdapterLive({
+      readClaudeCliVersion: async () => cliVersion,
+      createQuery: (input) => {
+        createInputs.push(input);
+        return new FakeClaudeQuery();
+      },
+    }).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(Layer.succeed(AgentGatewayCredentials, gateway.credentials)),
+    );
+    return { layer, createInputs };
+  }
+
+  const presetOf = (options: ClaudeQueryOptions | undefined) => {
+    const systemPrompt = options?.systemPrompt;
+    if (
+      systemPrompt === undefined ||
+      typeof systemPrompt === "string" ||
+      Array.isArray(systemPrompt) ||
+      systemPrompt.type !== "preset"
+    ) {
+      return assert.fail("Expected Claude preset system prompt.");
+    }
+    return systemPrompt;
+  };
+
+  const resumeCursor = {
+    threadId: "resume-thread-1",
+    resume: "550e8400-e29b-41d4-a716-446655440000",
+    turnCount: 3,
+  };
+
+  it.effect(
+    "appends a Builder's instructions on start and resume and removes native delegation",
+    () => {
+      const harness = makeHelixHarness();
+      const builder = helixRole("builder");
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          runtimeMode: "full-access",
+          helixRole: builder,
+        });
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          runtimeMode: "full-access",
+          helixRole: builder,
+          resumeCursor,
+        });
+
+        assert.lengthOf(harness.createInputs, 2);
+        const [start, resume] = harness.createInputs.map((input) => input.options);
+        assert.equal(resume?.resume, resumeCursor.resume);
+        for (const options of [start, resume]) {
+          const preset = presetOf(options);
+          // Base prompt, project/user instruction files and Synara host text stay.
+          assert.equal(preset.preset, "claude_code");
+          assert.equal(preset.excludeDynamicSections, true);
+          assert.deepEqual(options?.settingSources, ["user", "project", "local"]);
+          const append = preset.append ?? "";
+          assert.include(append, "You are running inside Synara");
+          assert.include(append, SYNARA_HARNESS_POLICY_MARKER);
+          assert.equal(occurrences(append, builder.instructions), 1);
+          assert.isTrue(append.endsWith(builder.instructions));
+          // Recorded prompts would ignore a changed append on resume.
+          assert.equal(preset.snapshot, false);
+          // Nothing steers a Builder to tools it cannot call.
+          assert.notInclude(append, "synara_");
+          assert.notInclude(append, "worker-");
+          assert.notInclude(append, "When spawning subagents");
+          assert.isUndefined(options?.agents);
+          assert.deepEqual(options?.disallowedTools, [...CLAUDE_HELIX_BUILDER_DISALLOWED_TOOLS]);
+          assert.deepEqual(options?.disallowedTools, [
+            "Agent",
+            "Task",
+            "Workflow",
+            "EnterWorktree",
+          ]);
+        }
+        assert.strictEqual(presetOf(start).append, presetOf(resume).append);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("keeps a Lead's subagents and ordinary tool policy and adds its role", () => {
+    const harness = makeHelixHarness();
+    const lead = helixRole("lead");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        helixRole: lead,
+        resumeCursor,
+      });
+
+      const options = harness.createInputs[0]?.options;
+      const append = presetOf(options).append ?? "";
+      assert.equal(occurrences(append, lead.instructions), 1);
+      assert.include(append, "When spawning subagents");
+      assert.include(
+        append,
+        "implementation work goes to the Helix Builder through helix_delegate",
+      );
+      assert.include(append, "Use the synara_* tools");
+      assert.include(append, "This thread is a Helix Lead");
+      assert.equal(presetOf(options).snapshot, false);
+      assert.isDefined(options?.agents?.["worker-medium"]);
+      // Sub-agents share the Lead's bearer: the Helix tools are out of their context.
+      for (const agent of Object.values(options?.agents ?? {})) {
+        for (const tool of CLAUDE_HELIX_TOOL_NAMES)
+          assert.include(agent.disallowedTools ?? [], tool);
+      }
+      assert.lengthOf(options?.hooks?.PreToolUse?.[0]?.hooks ?? [], 2);
+      assert.isUndefined(options?.disallowedTools);
+      assert.equal(options?.resume, resumeCursor.resume);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("turns prompt recording off only for Helix sessions on a CLI that records", () => {
+    const harness = makeHelixHarness("2.1.322");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "auto",
+        modelSelection: { provider: "claudeAgent", model: "claude-sonnet-5" },
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "auto",
+        modelSelection: { provider: "claudeAgent", model: "claude-sonnet-5" },
+        helixRole: helixRole("lead"),
+      });
+      const [ordinary, helix] = harness.createInputs.map((input) => presetOf(input.options));
+      assert.equal(ordinary?.snapshot, true);
+      assert.equal(helix?.snapshot, false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("leaves an ordinary session without Helix text or tool restrictions", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+      });
+      const options = harness.createInputs[0]?.options;
+      const preset = presetOf(options);
+      assert.strictEqual(preset.append, buildEmbeddedClaudeSystemPromptAppend(true, false));
+      assert.notInclude(preset.append ?? "", "Helix");
+      assert.isUndefined(preset.snapshot);
+      assert.isUndefined(options?.disallowedTools);
+      assert.isDefined(options?.agents?.["worker-low"]);
+      assert.isUndefined(options?.agents?.["worker-low"]?.disallowedTools);
+      assert.lengthOf(options?.hooks?.PreToolUse?.[0]?.hooks ?? [], 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  /** Starts an approval-required session and returns its canUseTool hook. */
+  const startForApprovals = (input: {
+    readonly helixRole?: ProviderHelixRoleContext;
+    readonly autoApproveSynaraTools?: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "approval-required",
+        ...input,
+      });
+      return adapter;
+    });
+
+  /** The call opens an interactive approval request; declining it denies the call. */
+  const expectPrompt = (
+    adapter: ClaudeAdapterShape,
+    canUseTool: NonNullable<ClaudeQueryOptions["canUseTool"]>,
+    toolName: string,
+    toolInput: Record<string, unknown> = {},
+  ) =>
+    Effect.gen(function* () {
+      const pending = canUseTool(toolName, toolInput, helixPermissionOptions(toolName));
+      const requested = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "request.opened",
+      ).pipe(Stream.runHead);
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+        return assert.fail(`${toolName} must open an approval request.`);
+      }
+      yield* adapter.respondToRequest(
+        THREAD_ID,
+        ApprovalRequestId.makeUnsafe(requested.value.requestId!),
+        "decline",
+      );
+      yield* Stream.runHead(adapter.streamEvents);
+      const result = (yield* Effect.promise(() => pending)) as PermissionResult;
+      assert.equal(result.behavior, "deny", toolName);
+    });
+
+  const expectAllowed = (
+    canUseTool: NonNullable<ClaudeQueryOptions["canUseTool"]>,
+    toolName: string,
+  ) =>
+    Effect.gen(function* () {
+      const result = (yield* Effect.promise(() =>
+        canUseTool(toolName, {}, helixPermissionOptions(toolName)),
+      )) as PermissionResult;
+      assert.equal(result.behavior, "allow", toolName);
+    });
+
+  it.effect("approves only a Lead's own helix tools without a prompt", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* startForApprovals({ helixRole: helixRole("lead") });
+      const canUseTool = harness.createInputs[0]?.options.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      for (const tool of ["helix_delegate", "helix_wait", "helix_inspect", "helix_review"]) {
+        yield* expectAllowed(canUseTool, `mcp__synara__${tool}`);
+      }
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__synara_create_thread");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__helix_report");
+      yield* expectPrompt(adapter, canUseTool, "Bash", { command: "pwd" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("approves a Builder's helix_report without a prompt and nothing else", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* startForApprovals({ helixRole: helixRole("builder") });
+      const canUseTool = harness.createInputs[0]?.options.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      yield* expectAllowed(canUseTool, "mcp__synara__helix_report");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__helix_delegate");
+      yield* expectPrompt(adapter, canUseTool, "Edit", { file_path: "/tmp/x", old_string: "a" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps helix tools on the prompt path for an ordinary session", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* startForApprovals({});
+      const canUseTool = harness.createInputs[0]?.options.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__helix_delegate");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__synara_create_thread");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the Hub coordinator grant over the whole gateway catalog", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* startForApprovals({ autoApproveSynaraTools: true });
+      const canUseTool = harness.createInputs[0]?.options.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      yield* expectAllowed(canUseTool, "mcp__synara__synara_create_thread");
+      yield* expectAllowed(canUseTool, "mcp__synara__helix_delegate");
+      yield* expectPrompt(adapter, canUseTool, "Bash", { command: "pwd" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("prompts a plan-mode Lead before it can delegate or review", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* startForApprovals({ helixRole: helixRole("lead") });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "Plan the change",
+        attachments: [],
+        interactionMode: "plan",
+      });
+      const canUseTool = harness.createInputs[0]?.options.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      // Read-only: they wait for or show state and start no Builder work.
+      yield* expectAllowed(canUseTool, "mcp__synara__helix_wait");
+      yield* expectAllowed(canUseTool, "mcp__synara__helix_inspect");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__helix_delegate");
+      yield* expectPrompt(adapter, canUseTool, "mcp__synara__helix_review");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("refuses Helix tools to a participant's sub-agents in every mode", () => {
+    const harness = makeHelixHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        helixRole: helixRole("lead"),
+      });
+      const options = harness.createInputs[0]?.options;
+      const canUseTool = options?.canUseTool;
+      if (!canUseTool) return assert.fail("Expected a canUseTool hook.");
+      for (const tool of CLAUDE_HELIX_TOOL_NAMES) {
+        const result = (yield* Effect.promise(() =>
+          canUseTool(tool, {}, { ...helixPermissionOptions(tool), agentID: "agent-1" }),
+        )) as PermissionResult;
+        assert.equal(result.behavior, "deny", tool);
+      }
+      // The same Lead's own call, and a sub-agent's ordinary tool, are not refused.
+      yield* expectAllowed(canUseTool, "mcp__synara__helix_delegate");
+      const subagentRead = (yield* Effect.promise(() =>
+        canUseTool("Read", {}, { ...helixPermissionOptions("read"), agentID: "agent-1" }),
+      )) as PermissionResult;
+      assert.equal(subagentRead.behavior, "allow");
+
+      // The PreToolUse hook covers calls that never reach canUseTool
+      // (bypassPermissions, settings allow rules).
+      const hook = options?.hooks?.PreToolUse?.[0]?.hooks[0];
+      if (!hook) return assert.fail("Expected the Helix PreToolUse hook.");
+      const hookCall = (extra: Record<string, unknown>) =>
+        Effect.promise(() =>
+          hook(
+            {
+              hook_event_name: "PreToolUse",
+              session_id: "s",
+              transcript_path: "/tmp/t",
+              cwd: "/tmp",
+              tool_input: {},
+              tool_use_id: "tool-1",
+              tool_name: "mcp__synara__helix_review",
+              ...extra,
+            } as HookInput,
+            "tool-1",
+            { signal: new AbortController().signal },
+          ),
+        );
+      const denied = yield* hookCall({ agent_id: "agent-1", agent_type: "general-purpose" });
+      assert.deepEqual(denied, {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason:
+            "Helix tools are for the Lead's own turn. A sub-agent cannot delegate, wait on, inspect, review or report Helix work; return your findings to the Lead instead.",
+        },
+      });
+      assert.deepEqual(yield* hookCall({}), {});
+      assert.deepEqual(yield* hookCall({ agent_id: "agent-1", tool_name: "Read" }), {});
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops every Helix change when the session restarts without a role", () => {
+    const harness = makeHelixHarness();
+    const builder = helixRole("builder");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        helixRole: builder,
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        resumeCursor,
+      });
+      const restarted = harness.createInputs[1]?.options;
+      const preset = presetOf(restarted);
+      assert.strictEqual(preset.append, buildEmbeddedClaudeSystemPromptAppend(true, false));
+      assert.isUndefined(preset.snapshot);
+      assert.isUndefined(restarted?.disallowedTools);
+      assert.isDefined(restarted?.agents?.["worker-low"]);
+      assert.lengthOf(restarted?.hooks?.PreToolUse?.[0]?.hooks ?? [], 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it("builds the ordinary append unchanged when no role is given", () => {
+    for (const [gateway, computer] of [
+      [true, false],
+      [true, true],
+      [false, false],
+    ] as const) {
+      assert.strictEqual(
+        buildEmbeddedClaudeSystemPromptAppend(gateway, computer, undefined),
+        buildEmbeddedClaudeSystemPromptAppend(gateway, computer),
+      );
+    }
+  });
+});

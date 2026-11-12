@@ -17,6 +17,7 @@ import {
   partitionSidebarThreadsByProjectIds,
 } from "../components/Sidebar.logic";
 import { collectGroupProjectIds } from "../lib/groupProjects";
+import { useHelixBuilderThreadIds } from "../helix/useHelix";
 import { useStore, type AppState } from "../store";
 import { createSidebarThreadSummariesSelector, isSidebarThreadVisible } from "../storeSelectors";
 import type { SidebarThreadSummary } from "../types";
@@ -24,7 +25,7 @@ import { useWorkspacePathsStore } from "../workspacePathsStore";
 
 interface ActivityThreads {
   readonly sidebarThreads: readonly SidebarThreadSummary[];
-  /** Every thread except hidden Group coordinators. */
+  /** Every thread except hidden Group coordinators and Helix Builders. */
   readonly displaySidebarThreads: readonly SidebarThreadSummary[];
   readonly groupProjectIdSet: ReturnType<typeof collectGroupProjectIds>;
   readonly groupThreads: readonly SidebarThreadSummary[];
@@ -38,6 +39,7 @@ interface ActivityThreads {
 type ActivityThreadInputs = readonly [
   sidebarThreads: readonly SidebarThreadSummary[],
   coordinatorThreadIds: ReadonlySet<string>,
+  helixBuilderThreadIds: ReadonlySet<string>,
   summariesByProjectId: ReadonlyMap<ProjectId, ProjectAgentSummary>,
   projects: AppState["projects"],
   homeDir: string | null,
@@ -63,6 +65,7 @@ function deriveActivityThreads(inputs: ActivityThreadInputs): ActivityThreads {
   const [
     sidebarThreads,
     coordinatorThreadIds,
+    helixBuilderThreadIds,
     summariesByProjectId,
     projects,
     homeDir,
@@ -71,9 +74,10 @@ function deriveActivityThreads(inputs: ActivityThreadInputs): ActivityThreads {
     groupsWorkspaceRoot,
     hideAutomationRunThreads,
   ] = inputs;
+  // Helix Builders are reached from their Lead chat, never listed on their own.
   const displaySidebarThreads = excludeHiddenProjectAgentCoordinatorThreads(
-    sidebarThreads,
-    coordinatorThreadIds,
+    excludeHiddenProjectAgentCoordinatorThreads(sidebarThreads, coordinatorThreadIds),
+    helixBuilderThreadIds,
   );
   const groupProjectIdSet = collectGroupProjectIds(projects, {
     homeDir,
@@ -115,12 +119,14 @@ export function useActivityThreads({
   const groupsWorkspaceRoot = useWorkspacePathsStore((store) => store.groupsWorkspaceRoot);
   const sidebarThreads = useStore(selectSidebarThreads);
   const coordinatorThreadIds = useCoordinatorThreadIds();
+  const helixBuilderThreadIds = useHelixBuilderThreadIds();
   const summariesByProjectId = useProjectAgentSummariesStore((state) => state.summariesByProjectId);
   return useMemo(
     () =>
       deriveActivityThreads([
         sidebarThreads,
         coordinatorThreadIds,
+        helixBuilderThreadIds,
         summariesByProjectId,
         projects,
         homeDir,
@@ -133,6 +139,7 @@ export function useActivityThreads({
       chatWorkspaceRoot,
       coordinatorThreadIds,
       groupsWorkspaceRoot,
+      helixBuilderThreadIds,
       hideAutomationRunThreads,
       homeDir,
       projects,

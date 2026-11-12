@@ -109,4 +109,22 @@ describe("makeAgentGatewayConnectorRegistry", () => {
     live.delete("b");
     expect(registry.canUse("b", "mcp_conn_1")).toBe(false);
   });
+
+  it("grants a Helix Builder no connectors and refuses one it held before", () => {
+    const builders = new Set<string>();
+    const registry = makeAgentGatewayConnectorRegistry({
+      sessionIsActive: () => true,
+      sessionWithholdsConnectors: (t) => builders.has(t),
+    });
+    registry.set([supabase]);
+    builders.add("builder");
+    expect(registry.grant("builder", "codex")).toEqual([]);
+    expect(registry.canUse("builder", "mcp_conn_1")).toBe(false);
+    // A grant made before the role was assigned no longer works once it is.
+    expect(registry.grant("later-builder", "codex")).toEqual([supabase]);
+    builders.add("later-builder");
+    expect(registry.canUse("later-builder", "mcp_conn_1")).toBe(false);
+    expect(registry.grant("lead", "claudeAgent")).toEqual([supabase]);
+    expect(registry.canUse("lead", "mcp_conn_1")).toBe(true);
+  });
 });

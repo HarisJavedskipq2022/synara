@@ -13,6 +13,7 @@ import { ServiceMap } from "effect";
 import type {
   AgentGatewaySessionIdentity,
   AgentGatewayRetiredWriteAuthority,
+  AgentGatewayRoleProfile,
   AgentGatewayWriteAuthority,
   AgentGatewayCapability,
 } from "./AgentGatewaySessionRegistry.ts";
@@ -125,6 +126,16 @@ export interface AgentGatewayCredentialsShape {
    * only call connectors it received at start (or at its latest renewal).
    */
   readonly canUseConnector?: (token: string, connectorId: string) => boolean;
+  /**
+   * Assign or clear a thread's server-side role profile (Helix Lead/Builder).
+   * Optional so test doubles stay small; the live layer always provides it,
+   * and Helix refuses to activate a pair when it is missing.
+   */
+  readonly setThreadRoleProfile?: (
+    threadId: string,
+    profile: AgentGatewayRoleProfile | null,
+  ) => void;
+  readonly getThreadRoleProfile?: (threadId: string) => AgentGatewayRoleProfile | null;
 }
 
 export class AgentGatewayCredentials extends ServiceMap.Service<

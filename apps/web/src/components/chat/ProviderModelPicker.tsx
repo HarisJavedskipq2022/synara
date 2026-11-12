@@ -311,6 +311,8 @@ type ProviderModelMenuItemsProps = {
   selectedProviderInstanceId?: ProviderInstanceId;
   showProviderInstanceChoices?: boolean;
   disabled?: boolean;
+  /** Providers this picker may not choose, each with the reason shown beside it. */
+  providerRestrictions?: Partial<Record<ProviderKind, string>>;
   onProviderModelChange: (
     provider: ProviderKind,
     model: ModelSlug,
@@ -771,6 +773,26 @@ export const ProviderModelMenuItems = function ProviderModelMenuItems(
     <>
       {visibleAvailableProviderOptions.map((option) => {
         const OptionIcon = PROVIDER_ICON_COMPONENT_BY_PROVIDER[option.value];
+        const restriction = props.providerRestrictions?.[option.value];
+        if (restriction !== undefined) {
+          return (
+            <MenuItem key={option.value} disabled className="items-start">
+              <OptionIcon
+                aria-hidden="true"
+                className={cn(
+                  "mt-0.5 size-3 shrink-0 opacity-80",
+                  providerIconClassName(option.value, "text-muted-foreground/85"),
+                )}
+              />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span>{option.label}</span>
+                <span className="whitespace-normal text-ui-xs text-muted-foreground/80">
+                  {restriction}
+                </span>
+              </span>
+            </MenuItem>
+          );
+        }
         const accounts = getProviderInstances(option.value).filter((instance) => instance.enabled);
         if (props.showProviderInstanceChoices !== false && accounts.length > 1) {
           // Several accounts: each is its own entry, like another provider would be.
@@ -950,6 +972,8 @@ type ProviderModelPickerProps = {
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
   showProviderInstanceChoices?: boolean;
+  /** Providers this picker may not choose, each with the reason shown beside it. */
+  providerRestrictions?: Partial<Record<ProviderKind, string>>;
   activeProviderIconClassName?: string;
   compact?: boolean;
   // Icon-only trigger for narrow composers; the model name moves to title/sr-only.
@@ -1133,6 +1157,9 @@ export const ProviderModelPicker = function ProviderModelPicker(props: ProviderM
             ? { showProviderInstanceChoices: props.showProviderInstanceChoices }
             : {})}
           {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
+          {...(props.providerRestrictions
+            ? { providerRestrictions: props.providerRestrictions }
+            : {})}
           onProviderModelChange={props.onProviderModelChange}
           onAfterSelection={handleAfterSelection}
         />

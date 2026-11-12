@@ -1210,5 +1210,8 @@
   "disconnect": "Disconnect",
   "connect": "Connect",
   "email": "Email",
-  "jiraEmailPlaceholder": "name@company.com"
+  "jiraEmailPlaceholder": "name@company.com",
+  "helix_settingTitle": "Helix",
+  "helix_settingDescription": "Let a chat hand implementation to a Builder agent that works in the same worktree while the chat's own agent plans and reviews. Claude and Codex only.",
+  "helix_couldNotUpdateSetting": "Could not update Helix"
 }

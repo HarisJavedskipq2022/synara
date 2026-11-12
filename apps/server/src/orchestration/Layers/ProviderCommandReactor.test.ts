@@ -164,6 +164,8 @@ import {
 } from "./ProviderCommandReactor.ts";
 import * as groupsBetaGate from "../../projectAgent/groupsBetaGate.ts";
 import { ProjectAgentService } from "../../projectAgent/Services/ProjectAgentService.ts";
+import type { HelixCoordinatorHooks } from "../../helix/coordinator.ts";
+import { HelixCoordinatorService } from "../../helix/Services/HelixCoordinator.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import {
   OrchestrationEngineService,
@@ -595,6 +597,7 @@ describe("ProviderCommandReactor", () => {
     >;
     readonly providerServiceLayer?: Layer.Layer<ProviderService, unknown>;
     readonly listRetainedSessions?: NonNullable<ProviderServiceShape["listRetainedSessions"]>;
+    readonly helixHooks?: HelixCoordinatorHooks;
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "synara-reactor-"));
@@ -1028,9 +1031,14 @@ describe("ProviderCommandReactor", () => {
           : Layer.empty,
       ),
       Layer.provideMerge(
-        input?.gatewaySessions
-          ? Layer.succeed(AgentGatewaySessionRegistry, input.gatewaySessions)
-          : Layer.empty,
+        Layer.mergeAll(
+          input?.gatewaySessions
+            ? Layer.succeed(AgentGatewaySessionRegistry, input.gatewaySessions)
+            : Layer.empty,
+          input?.helixHooks
+            ? Layer.succeed(HelixCoordinatorService, input.helixHooks)
+            : Layer.empty,
+        ),
       ),
       Layer.provideMerge(
         Layer.succeed(ProviderHealth, {
@@ -22210,6 +22218,234 @@ describe("ProviderCommandReactor", () => {
       expect(startInput).toMatchObject({ runtimeMode: "approval-required" });
     },
   );
+
+  describe("Helix hooks", () => {
+    const helixRole = {
+      role: "builder" as const,
+      pairId: "helix-pair:test" as never,
+      promptVersion: "helix-roles/1",
+      instructions: "Report with helix_report.",
+    };
+    const makeHooks = (overrides: Partial<HelixCoordinatorHooks> = {}): HelixCoordinatorHooks => ({
+      roleOf: () => null,
+      builderThreadIds: () => new Set(),
+      sessionRoleFor: () => Effect.succeed(null),
+      admitAutomaticTurn: () => Effect.succeed(true),
+      shouldSendServerTurn: () => Effect.succeed(true),
+      interceptClientCommand: () => Effect.succeed({ afterAccepted: Effect.void }),
+      assertMayMoveWorkspace: () => Effect.void,
+      awaitMessagePairing: () => Effect.void,
+      onDomainEvent: () => Effect.void,
+      sweep: () => Effect.void,
+      reconcileStartup: () => Effect.void,
+      ...overrides,
+    });
+    const startTurn = (
+      harness: { engine: { dispatch: (command: never) => Effect.Effect<unknown, unknown> } },
+      id: string,
+      messageId: string,
+      options: { readonly text?: string; readonly dispatchOrigin?: "automation" | "agent" } = {},
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`cmd-helix-${id}`),
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          message: {
+            messageId: asMessageId(messageId),
+            role: "user",
+            text: options.text ?? "work",
+            attachments: [],
+          },
+          ...(options.dispatchOrigin ? { dispatchOrigin: options.dispatchOrigin } : {}),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        } as never),
+      );
+
+    it("starts a participant's session with its Helix role and no wider auto-approval", async () => {
+      const harness = await createHarness({
+        helixHooks: makeHooks({ sessionRoleFor: () => Effect.succeed(helixRole) }),
+      });
+      await startTurn(harness, "role", "user-message-role");
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      const startInput = harness.startSession.mock.calls[0]?.[1];
+      expect(startInput).toMatchObject({ helixRole, runtimeMode: "approval-required" });
+      expect(startInput).not.toHaveProperty("autoApproveSynaraTools");
+    });
+
+    it("restarts the session at the next turn once the thread joins a pair", async () => {
+      let role: typeof helixRole | null = null;
+      const harness = await createHarness({
+        helixHooks: makeHooks({ sessionRoleFor: () => Effect.sync(() => role) }),
+      });
+      await startTurn(harness, "before", "user-message-before");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("helixRole");
+      role = { ...helixRole, role: "lead" as never };
+      await startTurn(harness, "after-enable", "user-message-after-enable");
+      await waitFor(() => harness.startSession.mock.calls.length === 2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        helixRole: { role: "lead" },
+      });
+    });
+
+    it("leaves a thread outside any pair exactly as before", async () => {
+      for (const helixHooks of [undefined, makeHooks()]) {
+        const harness = await createHarness(helixHooks ? { helixHooks } : {});
+        await startTurn(harness, `plain-${helixHooks ? "hooks" : "none"}`, "user-message-plain");
+        await waitFor(() => harness.startSession.mock.calls.length === 1);
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("helixRole");
+      }
+    });
+
+    it("drops a Helix automatic turn the coordinator does not admit, before any provider call", async () => {
+      const checked: string[] = [];
+      const harness = await createHarness({
+        helixHooks: makeHooks({
+          admitAutomaticTurn: ({ messageId }) =>
+            Effect.sync(() => {
+              checked.push(messageId);
+              return false;
+            }),
+        }),
+      });
+      await startTurn(harness, "held", "helix-brief:helix-handoff:1:1", {
+        text: "held brief text",
+        dispatchOrigin: "agent",
+      });
+      await waitFor(() => checked.length === 1);
+      // The held turn reached no provider call: no session start, no send.
+      expect(harness.startSession.mock.calls).toHaveLength(0);
+      expect(harness.sendTurn.mock.calls).toHaveLength(0);
+      // An ordinary message on the same thread still runs normally.
+      await startTurn(harness, "after", "user-message-after-held", { text: "ordinary text" });
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(checked).toEqual(["helix-brief:helix-handoff:1:1"]);
+      expect(harness.startSession.mock.calls).toHaveLength(1);
+      expect(harness.sendTurn.mock.calls).toHaveLength(1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        input: expect.stringContaining("ordinary text"),
+      });
+      expect(JSON.stringify(harness.sendTurn.mock.calls)).not.toContain("held brief text");
+    });
+
+    it("asks again immediately before the provider send, for any server turn on a participant", async () => {
+      const presend: Array<{ messageId: string; dispatchOrigin: string | undefined }> = [];
+      const admitted: string[] = [];
+      const harness = await createHarness({
+        helixHooks: makeHooks({
+          // thread-1 is a Builder: every server turn on it is gated.
+          roleOf: () => ({ role: "builder" }) as never,
+          admitAutomaticTurn: ({ messageId }) =>
+            Effect.sync(() => {
+              admitted.push(messageId);
+              return true;
+            }),
+          // A Stop lands between admission and the send.
+          shouldSendServerTurn: ({ messageId, dispatchOrigin }) =>
+            Effect.sync(() => {
+              presend.push({ messageId, dispatchOrigin });
+              return false;
+            }),
+        }),
+      });
+      await startTurn(harness, "usage", "usage-limit:resume-1", {
+        text: "usage limit resume text",
+        dispatchOrigin: "automation",
+      });
+      await waitFor(() => presend.length >= 1);
+      expect(admitted).toContain("usage-limit:resume-1");
+      expect(presend[0]).toEqual({
+        messageId: "usage-limit:resume-1",
+        dispatchOrigin: "automation",
+      });
+      expect(JSON.stringify(harness.sendTurn.mock.calls)).not.toContain("usage limit resume text");
+    });
+
+    it("waits for a message's pairing before the session starts, so it starts with the role", async () => {
+      let applied = false;
+      let release: (() => void) | null = null;
+      const asked: string[] = [];
+      const harness = await createHarness({
+        helixHooks: makeHooks({
+          awaitMessagePairing: (_threadId, messageId) =>
+            Effect.gen(function* () {
+              asked.push(messageId);
+              if (messageId !== "user-message-paired") return;
+              // The pairing is applied only when the test says so.
+              yield* Effect.callback<void>((resume) => {
+                release = () => {
+                  applied = true;
+                  resume(Effect.void);
+                };
+              });
+            }),
+          sessionRoleFor: () =>
+            Effect.sync(() => (applied ? { ...helixRole, role: "lead" as never } : null)),
+        }),
+      });
+      await startTurn(harness, "paired", "user-message-paired");
+      await waitFor(() => release !== null);
+      // The reactor reached the turn first: nothing starts before the pairing.
+      expect(harness.startSession.mock.calls).toHaveLength(0);
+      release!();
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        helixRole: { role: "lead" },
+      });
+      // A message without a pairing asks and goes straight on.
+      await startTurn(harness, "plain", "user-message-plain-2");
+      await waitFor(() => asked.includes("user-message-plain-2"));
+    });
+
+    it("withholds a Helix brief at the pre-send check quietly: no send, no session error", async () => {
+      let asked = 0;
+      const harness = await createHarness({
+        helixHooks: makeHooks({
+          roleOf: () => ({ role: "builder" }) as never,
+          // Admitted at promotion; a Stop lands before the send.
+          admitAutomaticTurn: () =>
+            Effect.sync(() => {
+              asked += 1;
+              return asked === 1;
+            }),
+        }),
+      });
+      await startTurn(harness, "brief", "helix-brief:helix-handoff:1:1", {
+        text: "withheld brief text",
+        dispatchOrigin: "agent",
+      });
+      await waitFor(() => asked >= 2);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(JSON.stringify(harness.sendTurn.mock.calls)).not.toContain("withheld brief text");
+      const thread = (await Effect.runPromise(harness.engine.getReadModel())).threads.find(
+        (entry) => entry.id === "thread-1",
+      );
+      expect(thread?.session?.status).not.toBe("error");
+      expect(thread?.session?.lastError ?? null).toBeNull();
+    });
+
+    it("interrupts a Helix turn whose Stop landed between the send and the bound turn id", async () => {
+      const harness = await createHarness({
+        helixHooks: makeHooks({
+          roleOf: () => ({ role: "builder" }) as never,
+          admitAutomaticTurn: () => Effect.succeed(true),
+          // Only the post-bind check (the turn id now known) sees the Stop.
+          shouldSendServerTurn: () => Effect.succeed(false),
+        }),
+      });
+      await startTurn(harness, "bound", "helix-brief:helix-handoff:2:1", {
+        text: "bound brief",
+        dispatchOrigin: "agent",
+      });
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await waitFor(() => harness.interruptTurn.mock.calls.length >= 1);
+      expect(harness.interruptTurn.mock.calls[0]?.[0]).toMatchObject({ threadId: "thread-1" });
+    });
+  });
 
   it("restarts a live coordinator session when the group loses the flag", async () => {
     const coordinatorConfigState: {

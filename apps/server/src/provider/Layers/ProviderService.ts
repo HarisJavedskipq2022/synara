@@ -28,6 +28,7 @@ import {
   ProviderSendTurnInput,
   ProviderStartReviewInput,
   ProviderSteerTurnInput,
+  ProviderHelixRoleContext,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ProviderStartOptions,
@@ -119,6 +120,7 @@ import {
   AGENT_GATEWAY_TURN_AUTHORITY_RETIRED,
 } from "../../agentGateway/sessionLease.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderHelixRoleResolver } from "../Services/ProviderHelixRoleResolver.ts";
 import { ServerSecretStore } from "../../auth/Services/ServerSecretStore.ts";
 import {
   codexSharedContinuationGeneration,
@@ -308,6 +310,11 @@ function toRuntimePayloadFromSession(
     readonly providerOptions?: unknown;
     readonly enableComputerControl?: boolean;
     readonly autoApproveSynaraTools?: boolean;
+    /**
+     * Helix role of the launch, so recovery and credential rotation restart a
+     * participant with its instructions. `null` clears a previous role.
+     */
+    readonly helixRole?: ProviderHelixRoleContext | null;
     /** Extra folders of a multi-folder project, so recovery restarts with the same grant. */
     readonly additionalDirectories?: ReadonlyArray<string>;
     readonly providerInstanceId?: string;
@@ -378,6 +385,7 @@ function toRuntimePayloadFromSession(
     ...(extra?.autoApproveSynaraTools !== undefined
       ? { autoApproveSynaraTools: extra.autoApproveSynaraTools }
       : {}),
+    ...(extra?.helixRole !== undefined ? { helixRole: extra.helixRole } : {}),
     ...(extra?.additionalDirectories !== undefined
       ? { additionalDirectories: [...extra.additionalDirectories] }
       : extra?.launchOptionsAuthoritative
@@ -454,6 +462,15 @@ function readPersistedAutoApproveSynaraTools(
   runtimePayload: ProviderRuntimeBinding["runtimePayload"],
 ): boolean {
   return runtimePayloadRecord(runtimePayload).autoApproveSynaraTools === true;
+}
+
+function readPersistedHelixRole(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ProviderHelixRoleContext | undefined {
+  const raw = runtimePayloadRecord(runtimePayload).helixRole;
+  return raw === undefined || raw === null
+    ? undefined
+    : Option.getOrUndefined(Schema.decodeUnknownOption(ProviderHelixRoleContext)(raw));
 }
 
 function readPersistedAdditionalDirectories(
@@ -976,6 +993,27 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const registry = yield* ProviderAdapterRegistry;
     const directory = yield* ProviderSessionDirectory;
+    const helixRoleResolver = Option.getOrUndefined(
+      yield* Effect.serviceOption(ProviderHelixRoleResolver),
+    );
+    /**
+     * The Helix role a self-initiated restart (recovery, credential rotation,
+     * provider-switch restore) starts with. The persisted role is only what
+     * the last launch had; when one exists, Helix is asked for the current one
+     * so a disabled pair or changed role text is never revived. `undefined`
+     * means none. Without a registered resolver the persisted role is kept.
+     */
+    const currentHelixRoleForRestart = (
+      threadId: ThreadId,
+      persisted: ProviderHelixRoleContext | undefined,
+    ): Effect.Effect<ProviderHelixRoleContext | undefined> =>
+      persisted === undefined || helixRoleResolver === undefined
+        ? Effect.succeed(persisted)
+        : helixRoleResolver
+            .resolve(threadId)
+            .pipe(
+              Effect.map((current) => (current === undefined ? persisted : (current ?? undefined))),
+            );
     const serverSettings = yield* ServerSettingsService;
     const secretStore = yield* ServerSecretStore;
     const credentialsFingerprintKey = yield* secretStore.getOrCreateRandom(
@@ -1591,6 +1629,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         readonly providerOptions?: unknown;
         readonly enableComputerControl?: boolean;
         readonly autoApproveSynaraTools?: boolean;
+        readonly helixRole?: ProviderHelixRoleContext | null;
         readonly additionalDirectories?: ReadonlyArray<string>;
         readonly providerInstanceId?: string;
         readonly lastRuntimeEvent?: string;
@@ -2579,6 +2618,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const persistedAdditionalDirectories = readPersistedAdditionalDirectories(
               binding.runtimePayload,
             );
+            const persistedHelixRole = readPersistedHelixRole(binding.runtimePayload);
+            const recoveredHelixRole = yield* currentHelixRoleForRestart(
+              threadId,
+              persistedHelixRole,
+            );
             yield* validateAutoRuntimeMode(
               input.operation,
               resolved.instance.driver,
@@ -2596,6 +2640,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
               ...(persistedComputerControl ? { enableComputerControl: true } : {}),
               ...(persistedAutoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
+              ...(recoveredHelixRole ? { helixRole: recoveredHelixRole } : {}),
               ...(persistedAdditionalDirectories.length > 0
                 ? { additionalDirectories: persistedAdditionalDirectories }
                 : {}),
@@ -2628,6 +2673,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
                 ...(persistedComputerControl ? { enableComputerControl: true } : {}),
                 ...(persistedAutoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
+                ...(recoveredHelixRole !== persistedHelixRole
+                  ? { helixRole: recoveredHelixRole ?? null }
+                  : {}),
                 additionalDirectories: persistedAdditionalDirectories,
                 launchOptionsAuthoritative: true,
               }).pipe(
@@ -3375,6 +3423,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     providerInstanceId: resolved.instance.instanceId,
                     enableComputerControl: effectiveComputerControl,
                     autoApproveSynaraTools: effectiveAutoApproveSynaraTools,
+                    // The launch is authoritative: no role clears one a previous
+                    // launch persisted, so recovery never revives a stale role.
+                    ...(input.helixRole !== undefined
+                      ? { helixRole: input.helixRole }
+                      : persistedBinding !== undefined &&
+                          readPersistedHelixRole(persistedBinding.runtimePayload) !== undefined
+                        ? { helixRole: null }
+                        : {}),
                     additionalDirectories: input.additionalDirectories ?? [],
                     lifecycleGeneration: lease.generation,
                     launchOptionsAuthoritative: true,
@@ -3443,6 +3499,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               const previousAdditionalDirectories = readPersistedAdditionalDirectories(
                 persistedBinding.runtimePayload,
               );
+              const persistedPreviousHelixRole = readPersistedHelixRole(
+                persistedBinding.runtimePayload,
+              );
+              const previousHelixRole = yield* currentHelixRoleForRestart(
+                threadId,
+                persistedPreviousHelixRole,
+              );
               // The recycled flag is a (value, generation) pair with the restored
               // lifecycle generation, not the old bool alone: when the failed
               // replacement turn carried an explicit computer-control value, that
@@ -3487,6 +3550,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           ...(restoredAutoApproveSynaraTools
                             ? { autoApproveSynaraTools: true }
                             : {}),
+                          ...(previousHelixRole ? { helixRole: previousHelixRole } : {}),
                           ...(previousAdditionalDirectories.length > 0
                             ? { additionalDirectories: previousAdditionalDirectories }
                             : {}),
@@ -3514,6 +3578,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             providerOptions: previousProviderOptions,
                             enableComputerControl: restoredComputerControl,
                             autoApproveSynaraTools: restoredAutoApproveSynaraTools,
+                            ...(previousHelixRole !== undefined ||
+                            persistedPreviousHelixRole !== undefined
+                              ? { helixRole: previousHelixRole ?? null }
+                              : {}),
                             additionalDirectories: previousAdditionalDirectories,
                             runtimePayload: {
                               providerOptionsCredentialsFingerprint:

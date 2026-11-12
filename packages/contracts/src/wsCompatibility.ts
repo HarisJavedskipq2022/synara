@@ -73,6 +73,11 @@ export const WS_SERVER_CAPABILITIES = [
   WS_USAGE_LIMIT_RECOVERY_CAPABILITY,
   WS_GIT_ACTION_RECOVERY_CAPABILITY,
   WS_SERVER_RUNTIME_STATUS_CAPABILITY,
+  // helix.* RPCs (docs/plans/helix-prototype.md). Clients merge WsHelixRpcGroup
+  // and call helix.* only when the server advertises it.
+  "helix.pairs",
+  // User messages may carry a Helix pairing (`helix` on thread.turn.start).
+  "helix.message-pairing",
   // Single-handshake connect: negotiation is available over plain HTTP at
   // WS_NEGOTIATE_HTTP_PATH, so a connect costs exactly one WebSocket upgrade.
   "transport.http-negotiate",

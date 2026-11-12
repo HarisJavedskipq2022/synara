@@ -10,11 +10,12 @@ import {
   type ThreadId,
 } from "@synara/contracts";
 import { automationContinuationThreadId } from "@synara/shared/automationMode";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { randomUUID } from "node:crypto";
 
 import { ServerConfig } from "./config";
 import { GitCore } from "./git/Services/GitCore";
+import { HelixCoordinatorService } from "./helix/Services/HelixCoordinator";
 import { pruneProjectedArchivedManagedWorktrees } from "./managedWorktrees";
 import type { OrchestrationEngineShape } from "./orchestration/Services/OrchestrationEngine";
 import type { ProjectionSnapshotQueryShape } from "./orchestration/Services/ProjectionSnapshotQuery";
@@ -228,9 +229,14 @@ export const runThreadRetentionSweep = Effect.fn("runThreadRetentionSweep")(func
   projectionSnapshotQuery: ProjectionSnapshotQueryShape,
   automationRepository: AutomationRepositoryShape,
   pruneArchivedManagedWorktrees: Effect.Effect<void, unknown>,
+  /** Threads that follow another thread's lifecycle (Helix Builders follow their Lead). */
+  followerThreadIds: () => ReadonlySet<string> = () => new Set(),
 ) {
   const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-  const protectedThreadIds = yield* listRetentionProtectedThreadIds(automationRepository);
+  const protectedThreadIds = new Set<ThreadId>([
+    ...(yield* listRetentionProtectedThreadIds(automationRepository)),
+    ...([...followerThreadIds()] as ThreadId[]),
+  ]);
   const archiveRootIds = getRetentionArchiveRootIds(shellSnapshot, Date.now(), protectedThreadIds);
   const totalCandidateCount = archiveRootIds.length;
   let archivedCount = 0;
@@ -309,6 +315,9 @@ export const startThreadRetentionJob = Effect.fn("startThreadRetentionJob")(func
   projectionSnapshotQuery: ProjectionSnapshotQueryShape,
 ) {
   const automationRepository = yield* AutomationRepository;
+  const helix = Option.getOrUndefined(yield* Effect.serviceOption(HelixCoordinatorService));
+  // A Builder is archived with its Lead (by Helix), never on its own.
+  const followerThreadIds = () => helix?.builderThreadIds() ?? new Set<string>();
   const config = yield* ServerConfig;
   const git = yield* GitCore;
   const pruneArchivedManagedWorktrees = pruneProjectedArchivedManagedWorktrees({
@@ -326,6 +335,7 @@ export const startThreadRetentionJob = Effect.fn("startThreadRetentionJob")(func
       projectionSnapshotQuery,
       automationRepository,
       pruneArchivedManagedWorktrees,
+      followerThreadIds,
     );
     yield* Effect.forever(
       Effect.sleep(THREAD_RETENTION_SWEEP_INTERVAL_MS).pipe(
@@ -335,6 +345,7 @@ export const startThreadRetentionJob = Effect.fn("startThreadRetentionJob")(func
             projectionSnapshotQuery,
             automationRepository,
             pruneArchivedManagedWorktrees,
+            followerThreadIds,
           ),
         ),
       ),

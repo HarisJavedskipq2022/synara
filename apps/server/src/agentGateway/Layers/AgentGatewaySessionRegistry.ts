@@ -5,6 +5,7 @@ import { Layer } from "effect";
 import {
   AgentGatewaySessionRegistry,
   type AgentGatewayCapability,
+  type AgentGatewayRoleProfile,
   type AgentGatewaySessionIdentity,
   type AgentGatewaySessionRegistryShape,
   type AgentGatewayWriteAuthority,
@@ -18,6 +19,21 @@ const PROVIDER_SESSION_CAPABILITIES = [
   "browser:control",
   "device:control",
 ] as const;
+
+/**
+ * The capabilities a credential exposes under a role profile. `granted` is
+ * what the credential was issued with (base plus requested additions). A
+ * Builder sees only its own tool family; nothing it was issued survives.
+ */
+export function agentGatewayCapabilitiesForRoleProfile(
+  granted: ReadonlySet<AgentGatewayCapability>,
+  profile: AgentGatewayRoleProfile | null,
+): ReadonlySet<AgentGatewayCapability> {
+  if (profile === null) return granted;
+  if (profile.kind === "helix_builder") return new Set<AgentGatewayCapability>(["helix:builder"]);
+  if (profile.kind === "helix_retired") return new Set<AgentGatewayCapability>();
+  return new Set<AgentGatewayCapability>([...granted, "helix:lead"]);
+}
 
 export function makeAgentGatewaySessionRegistry(options?: {
   readonly now?: () => number;
@@ -33,16 +49,29 @@ export function makeAgentGatewaySessionRegistry(options?: {
   const sessionsByKey = new Map<string, RegisteredSession>();
 
   const disabledComputerThreads = new Set<string>();
-  const visibleIdentity = (identity: AgentGatewaySessionIdentity): AgentGatewaySessionIdentity =>
-    disabledComputerThreads.has(identity.threadId)
-      ? {
-          ...identity,
-          capabilities: new Set(
-            [...identity.capabilities].filter((capability) => capability !== "computer:control"),
-          ),
-        }
-      : identity;
+  const roleProfiles = new Map<string, AgentGatewayRoleProfile>();
+  const visibleIdentity = (identity: AgentGatewaySessionIdentity): AgentGatewaySessionIdentity => {
+    const granted = disabledComputerThreads.has(identity.threadId)
+      ? new Set(
+          [...identity.capabilities].filter((capability) => capability !== "computer:control"),
+        )
+      : identity.capabilities;
+    const profile = roleProfiles.get(identity.threadId) ?? null;
+    if (profile === null) {
+      return granted === identity.capabilities ? identity : { ...identity, capabilities: granted };
+    }
+    return {
+      ...identity,
+      capabilities: agentGatewayCapabilitiesForRoleProfile(granted, profile),
+      roleProfile: profile,
+    };
+  };
   return {
+    setThreadRoleProfile: (threadId, profile) => {
+      if (profile === null) roleProfiles.delete(threadId);
+      else roleProfiles.set(threadId, profile);
+    },
+    getThreadRoleProfile: (threadId) => roleProfiles.get(threadId) ?? null,
     setComputerControlEnabled: (threadId, enabled) => {
       if (enabled) disabledComputerThreads.delete(threadId);
       else {
@@ -64,7 +93,12 @@ export function makeAgentGatewaySessionRegistry(options?: {
       const candidates = [...sessionsByKey.values()].filter(
         (row) => row.identity.threadId === threadId && row.identity.provider === provider,
       );
-      return candidates.at(-1)?.identity.capabilities.has("computer:control") ?? false;
+      const latest = candidates.at(-1);
+      if (!latest) return false;
+      // Without a role profile: exactly the pre-Helix reading of the stored identity.
+      return roleProfiles.has(threadId)
+        ? visibleIdentity(latest.identity).capabilities.has("computer:control")
+        : latest.identity.capabilities.has("computer:control");
     },
     issue: (threadId, provider, issueOptions) => {
       // Every provider runtime owns an independent credential. Replacement
@@ -93,7 +127,8 @@ export function makeAgentGatewaySessionRegistry(options?: {
       };
       sessions.set(token, registered);
       sessionsByKey.set(sessionKey, registered);
-      return { token, ...identity };
+      // Without a role profile the issued identity is exactly the pre-Helix one.
+      return { token, ...(roleProfiles.has(threadId) ? visibleIdentity(identity) : identity) };
     },
     verify: (token) => {
       const identity = sessions.get(token)?.identity;

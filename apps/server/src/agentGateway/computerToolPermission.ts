@@ -1,5 +1,8 @@
 import {
   BROWSER_TOOL_NAMES,
+  HELIX_BUILDER_TOOL_NAMES,
+  HELIX_LEAD_TOOL_NAMES,
+  HELIX_TOOL_NAMES,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@synara/contracts";
@@ -233,6 +236,8 @@ const SYNARA_GATEWAY_OWNED_TOOL_NAMES = [
   "synara_project_write_document",
   // Browser review tool (browserTools.ts)
   "synara_e2e_review",
+  // Helix tools (helixTools.ts), served only to Helix Lead/Builder credentials
+  ...HELIX_TOOL_NAMES,
   // Capability-gated device tools (deviceTools.ts — not in contracts)
   "device_boot",
   "device_configure",
@@ -295,6 +300,46 @@ export function isSynaraGatewayToolName(value: unknown): boolean {
     normalized.startsWith(SYNARA_MCP_SERVER_PREFIX) &&
     SYNARA_GATEWAY_TOOL_NAME_SET.has(normalized.slice(SYNARA_MCP_SERVER_PREFIX.length))
   );
+}
+
+const HELIX_GATEWAY_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(HELIX_TOOL_NAMES);
+
+function helixBareToolName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  const bare = normalized.startsWith(SYNARA_MCP_QUALIFIED_PREFIX)
+    ? normalized.slice(SYNARA_MCP_QUALIFIED_PREFIX.length)
+    : normalized.startsWith(SYNARA_MCP_SERVER_PREFIX)
+      ? normalized.slice(SYNARA_MCP_SERVER_PREFIX.length)
+      : null;
+  return bare !== null && HELIX_GATEWAY_TOOL_NAME_SET.has(bare) ? bare : null;
+}
+
+/** A server-qualified Helix tool (`mcp__synara__helix_*` or `synara_helix_*`). */
+export function isHelixGatewayToolName(value: unknown): boolean {
+  return helixBareToolName(value) !== null;
+}
+
+/**
+ * The single auto-approve rule for gateway tools in a provider permission
+ * prompt. `autoApproveSynaraTools` (an active Hub coordinator) covers the whole
+ * gateway catalog; a Helix participant (`helixRole` set) gets only its
+ * `helix_*` tools, so Helix never widens approval of anything else. The
+ * gateway still authorizes every call server-side.
+ */
+export function shouldAutoApproveSynaraGatewayTool(
+  input: { readonly autoApproveSynaraTools?: boolean; readonly helixRole?: unknown },
+  toolName: unknown,
+): boolean {
+  if (input.autoApproveSynaraTools === true && isSynaraGatewayToolName(toolName)) return true;
+  // Role-exact: a Lead's four tools for a Lead, only helix_report for a Builder.
+  const role = (input.helixRole as { readonly role?: unknown } | null | undefined)?.role;
+  if (role !== "lead" && role !== "builder") return false;
+  const bare = helixBareToolName(toolName);
+  if (bare === null) return false;
+  return role === "lead"
+    ? (HELIX_LEAD_TOOL_NAMES as readonly string[]).includes(bare)
+    : (HELIX_BUILDER_TOOL_NAMES as readonly string[]).includes(bare);
 }
 
 /**

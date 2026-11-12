@@ -9,7 +9,10 @@ import {
   ProviderCredentialsLive,
 } from "../providerCredentials";
 import { ServerSettingsService } from "../serverSettings";
+import type { AgentGatewayCredentials } from "../agentGateway/Services/AgentGatewayCredentials";
 import { makeClaudeAdapterLive } from "./Layers/ClaudeAdapter";
+import type { ClaudeAdapter } from "./Services/ClaudeAdapter";
+import type { CodexAdapter } from "./Services/CodexAdapter";
 import { makeCodexAdapterLive } from "./Layers/CodexAdapter";
 import { makeCursorAdapterLive } from "./Layers/CursorAdapter";
 import { makeDevinAdapterLive } from "./Layers/DevinAdapter";
@@ -31,6 +34,15 @@ import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/Provid
 export function makeServerProviderLayer(
   options: {
     readonly agentGatewayCredentialsLayer?: typeof AgentGatewayCredentialsWithSecretsLive;
+    /**
+     * Integration tests only: replace the Codex and Claude adapters with
+     * scripted ones. They receive the same gateway credentials as the real
+     * adapters, so their sessions get real thread-scoped credentials.
+     */
+    readonly testAdapterLayers?: {
+      readonly codex: Layer.Layer<CodexAdapter, never, AgentGatewayCredentials>;
+      readonly claudeAgent: Layer.Layer<ClaudeAdapter, never, AgentGatewayCredentials>;
+    };
   } = {},
 ) {
   return Effect.gen(function* () {
@@ -56,12 +68,16 @@ export function makeServerProviderLayer(
     // the same MCP catalog/dispatcher through its native custom-tool API.
     const agentGatewayCredentialsLayer =
       options.agentGatewayCredentialsLayer ?? AgentGatewayCredentialsWithSecretsLive;
-    const codexAdapterLayer = makeCodexAdapterLive(
-      nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
-    const claudeAdapterLayer = makeClaudeAdapterLive(
-      nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
+    const codexAdapterLayer = options.testAdapterLayers
+      ? options.testAdapterLayers.codex.pipe(Layer.provide(agentGatewayCredentialsLayer))
+      : makeCodexAdapterLive(nativeEventLogger ? { nativeEventLogger } : undefined).pipe(
+          Layer.provide(agentGatewayCredentialsLayer),
+        );
+    const claudeAdapterLayer = options.testAdapterLayers
+      ? options.testAdapterLayers.claudeAgent.pipe(Layer.provide(agentGatewayCredentialsLayer))
+      : makeClaudeAdapterLive(nativeEventLogger ? { nativeEventLogger } : undefined).pipe(
+          Layer.provide(agentGatewayCredentialsLayer),
+        );
     const openCodeAdapterLayer = makeOpenCodeAdapterLive({
       ...(nativeEventLogger ? { nativeEventLogger } : {}),
       resolveServerPassword: resolveProviderServerPassword,

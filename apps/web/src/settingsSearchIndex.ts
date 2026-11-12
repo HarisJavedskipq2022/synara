@@ -582,6 +582,13 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     keywords: "settings:resumeAfterUsageLimitsDescription",
   },
   {
+    target: "setting-helix",
+    id: "providers:helix",
+    section: "providers",
+    title: "settings:helix_settingTitle",
+    keywords: "settings:helix_settingDescription",
+  },
+  {
     target: "setting-keep-synara-responsive",
     id: "providers:cpu-priority",
     section: "providers",

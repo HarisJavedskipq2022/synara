@@ -8,7 +8,33 @@ export type AgentGatewayCapability =
   | "diagnostics:read"
   | "browser:control"
   | "device:control"
-  | "computer:control";
+  | "computer:control"
+  /** Helix Lead tools, granted on top of a Lead's normal set. */
+  | "helix:lead"
+  /** Helix Builder tools. A Builder credential carries this capability and nothing else. */
+  | "helix:builder";
+
+/**
+ * A server-assigned role that reshapes a thread's gateway capabilities.
+ *
+ * Profiles are keyed by thread and applied when a credential is issued AND
+ * every time it is verified, so a credential issued before the profile was
+ * set (or after it was cleared) always reflects the current assignment.
+ *
+ * - `helix_lead`: the thread's normal capabilities plus `helix:lead`.
+ * - `helix_builder`: exactly `helix:builder`. Every base capability,
+ *   requested additional capability (including computer control) and MCP
+ *   connector is withheld. This is the only way to REMOVE base capabilities.
+ */
+export type AgentGatewayRoleProfile =
+  | { readonly kind: "helix_lead"; readonly pairId: string }
+  | { readonly kind: "helix_builder"; readonly pairId: string }
+  /**
+   * A former Builder whose pair is gone: no capabilities at all, for good.
+   * Set instead of clearing, so a credential still held by a stopping session
+   * never widens to the base set.
+   */
+  | { readonly kind: "helix_retired"; readonly pairId: string };
 
 export interface AgentGatewaySessionIdentity {
   readonly sessionKey: string;
@@ -16,6 +42,8 @@ export interface AgentGatewaySessionIdentity {
   readonly provider: ProviderKind;
   readonly issuedAt: number;
   readonly capabilities: ReadonlySet<AgentGatewayCapability>;
+  /** Present only while the thread holds a role profile. */
+  readonly roleProfile?: AgentGatewayRoleProfile;
 }
 
 export interface AgentGatewayIssuedSession extends AgentGatewaySessionIdentity {
@@ -77,6 +105,15 @@ export interface AgentGatewaySessionRegistryShape {
     threadId: string,
   ) => ReadonlyArray<AgentGatewayRetiredWriteAuthority>;
   readonly setComputerControlEnabled?: (threadId: string, enabled: boolean) => void;
+  /**
+   * Assign (or with null, clear) a thread's role profile. Takes effect for
+   * live credentials on their next verification and for every new credential.
+   */
+  readonly setThreadRoleProfile: (
+    threadId: string,
+    profile: AgentGatewayRoleProfile | null,
+  ) => void;
+  readonly getThreadRoleProfile: (threadId: string) => AgentGatewayRoleProfile | null;
   readonly computerControlProvisioned?: (threadId: string, provider: ProviderKind) => boolean;
 }
 

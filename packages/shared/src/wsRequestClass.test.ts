@@ -1,4 +1,4 @@
-import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@synara/contracts";
+import { HELIX_WS_METHODS, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,6 +13,13 @@ describe("wsRequestClass", () => {
     expect(classifyWsRequest(ORCHESTRATION_WS_METHODS.dispatchCommand)).toBe("control");
     expect(classifyWsRequest(ORCHESTRATION_WS_METHODS.replayEvents)).toBe("expensive-read");
     expect(classifyWsRequest(WS_METHODS.gitListBranches)).toBe("standard");
+  });
+
+  it("never queues a Helix pair control behind ordinary requests", () => {
+    for (const method of [HELIX_WS_METHODS.stop, HELIX_WS_METHODS.pause, HELIX_WS_METHODS.resume]) {
+      expect(classifyWsRequest(method)).toBe("control");
+    }
+    expect(classifyWsRequest(HELIX_WS_METHODS.getPair)).toBe("standard");
   });
 
   it("builds the retryable capacity rejection clients depend on", () => {

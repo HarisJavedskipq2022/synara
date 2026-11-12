@@ -2319,6 +2319,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         ...(input.autoApproveSynaraTools !== undefined
           ? { autoApproveSynaraTools: input.autoApproveSynaraTools }
           : {}),
+        ...(input.helixRole !== undefined ? { helixRole: input.helixRole } : {}),
         runtimeMode: input.runtimeMode,
         ...codexModelSelectionOverrides(input.modelSelection),
       };

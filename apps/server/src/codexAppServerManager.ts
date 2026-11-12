@@ -27,6 +27,7 @@ import {
   TurnId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderHelixRoleContext,
   type ProviderSession,
   type ProviderSessionStartInput,
   type ProviderTurnStartResult,
@@ -70,7 +71,9 @@ import {
   isSynaraGatewayToolName,
   shouldAllowSynaraComputerProviderTool,
 } from "./agentGateway/computerToolPermission.ts";
+import { shouldAutoApproveGatewayToolForSession } from "./provider/helixToolApproval.ts";
 import {
+  INLINE_VISUALS_ENABLED,
   SYNARA_GATEWAY_HARNESS_POLICY,
   renderSynaraHarnessPolicy,
 } from "./agentGateway/harnessPolicy.ts";
@@ -225,6 +228,10 @@ interface CodexSessionContext {
   gatewayRenewalInProgress?: boolean;
   serviceTier?: string | null;
   activeInteractionMode?: ProviderInteractionMode | undefined;
+  /** Helix participant role, fixed for this runtime. Absent for every other session. */
+  readonly helixRole?: ProviderHelixRoleContext;
+  /** Helix only: the native mode last sent, kept for a turn that names none. */
+  helixCollaborationMode?: "default" | "plan";
   session: ProviderSession;
   lifecycleGeneration?: string;
   account: CodexAccountSnapshot;
@@ -380,6 +387,8 @@ type CodexAppServerReviewTarget = ProviderStartReviewInput["target"];
 
 export interface CodexAppServerStartSessionInput {
   readonly autoApproveSynaraTools?: boolean;
+  /** Helix role context from the session start input; see `buildCodexHelixCollaborationMode`. */
+  readonly helixRole?: ProviderHelixRoleContext;
   readonly threadId: ThreadId;
   readonly provider?: "codex";
   readonly providerInstanceId?: string;
@@ -540,7 +549,7 @@ ${BROWSER_SCRIPT_BATCH_GUIDANCE} Return promptly. Use dedicated tools for tab li
 
 Saved accounts: \`credentials.list()\` and \`credentials.listPending()\` provide origin-scoped metadata only. Password filling, generation and vault changes are unavailable to browser scripts. Ask the human to sign in manually or import a browser session through Saved logins; never ask for passwords in chat or retry credential mutations. Never read password inputs, return credentials, or reveal/transform secrets. Password retrieval/cookie import are human-only Saved logins UI. Manual input interrupts automation; wait for handoff, never fight it.`;
 
-export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
+const CODEX_PLAN_MODE_COLLABORATION_BLOCK = `<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
 
@@ -660,9 +669,11 @@ plan content should be human and agent digestible. The final plan must be plan-o
 Do not ask "should I proceed?" in the final output. The user can easily switch out of Plan mode and request implementation if you have included a \`<proposed_plan>\` block in your response. Alternatively, they can decide to stay in Plan mode and continue refining the plan.
 
 Only produce at most one \`<proposed_plan>\` block per turn, and only when you are presenting a complete spec.
-</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}\n\n${SYNARA_GATEWAY_HARNESS_POLICY}`;
+</collaboration_mode>`;
 
-export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Collaboration Mode: Default
+export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `${CODEX_PLAN_MODE_COLLABORATION_BLOCK}${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}\n\n${SYNARA_GATEWAY_HARNESS_POLICY}`;
+
+const CODEX_DEFAULT_MODE_COLLABORATION_BLOCK = `<collaboration_mode># Collaboration Mode: Default
 
 You are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.
 
@@ -673,7 +684,9 @@ Your active mode changes only when new developer instructions with a different \
 The \`request_user_input\` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error.
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
-</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}\n\n${SYNARA_GATEWAY_HARNESS_POLICY}`;
+</collaboration_mode>`;
+
+export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS = `${CODEX_DEFAULT_MODE_COLLABORATION_BLOCK}${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}\n\n${SYNARA_GATEWAY_HARNESS_POLICY}`;
 
 // Maps Synara's simple runtime toggle to Codex thread-level permission overrides.
 function mapCodexRuntimeMode(runtimeMode: RuntimeMode): {
@@ -704,8 +717,28 @@ function mapCodexRuntimeMode(runtimeMode: RuntimeMode): {
   }
 }
 
+type CodexThreadConfig = Partial<ReturnType<typeof buildCodexMcpThreadConfig>> & {
+  readonly features?: { readonly multi_agent: false };
+};
+
+/**
+ * Per-thread config for a Helix participant: Codex's native multi-agent tools
+ * are switched off (`features.multi_agent`, merged over the user's config like
+ * the gateway's `mcp_servers`). A Builder must not hand its brief to workers,
+ * and a Lead's children would share its MCP config and bearer, so they could
+ * delegate or accept results as the Lead; Codex offers no per-child tool
+ * filter for that. Every other session's config is returned untouched.
+ */
+export function withCodexHelixThreadConfig(
+  config: ReturnType<typeof buildCodexMcpThreadConfig> | undefined,
+  helixRole: ProviderHelixRoleContext | undefined,
+): CodexThreadConfig | undefined {
+  if (helixRole === undefined) return config;
+  return { ...config, features: { multi_agent: false } };
+}
+
 interface CodexThreadSessionOverrides {
-  readonly config?: ReturnType<typeof buildCodexMcpThreadConfig>;
+  readonly config?: CodexThreadConfig;
   readonly model: string | null;
   readonly serviceTier?: string;
   readonly cwd: string;
@@ -848,6 +881,25 @@ export function resolveCodexModelForAccount(
   return CODEX_DEFAULT_MODEL;
 }
 
+/**
+ * The model a session asks Codex for. Ordinary sessions keep the Spark
+ * fallback above; a Helix participant is refused instead, because Helix never
+ * substitutes the model a pair was configured with.
+ */
+export function resolveCodexSessionModel(
+  model: string | undefined,
+  account: CodexAccountSnapshot,
+  helixRole: ProviderHelixRoleContext | undefined,
+): string | undefined {
+  if (helixRole === undefined) return resolveCodexModelForAccount(model, account);
+  if (model === CODEX_SPARK_MODEL && !account.sparkEnabled) {
+    throw new Error(
+      `This Helix ${helixRole.role} is set to ${CODEX_SPARK_MODEL}, which this Codex account${account.planType ? ` (${account.planType} plan)` : ""} cannot use. Helix does not switch models on its own: choose another Codex model for the ${helixRole.role}.`,
+    );
+  }
+  return model;
+}
+
 function spawnCodexAppServer(input: {
   readonly lowerPriority: boolean;
   readonly binaryPath: string;
@@ -900,21 +952,95 @@ function buildCodexInitializeParams() {
   } as const;
 }
 
+export type CodexCollaborationMode = {
+  mode: "default" | "plan";
+  settings: {
+    model: string;
+    reasoning_effort: string | null;
+    developer_instructions: string;
+  };
+};
+
+/**
+ * Codex developer instructions for a Helix participant: the mode block, the
+ * browser routing a Builder cannot use dropped, the role-aware host policy and
+ * the role text last. Deterministic, so Codex sees the same text every turn.
+ */
+export function buildCodexHelixDeveloperInstructions(input: {
+  readonly helixRole: ProviderHelixRoleContext;
+  readonly mode: "default" | "plan";
+  readonly enableComputerControl?: boolean;
+}): string {
+  const block =
+    input.mode === "plan"
+      ? CODEX_PLAN_MODE_COLLABORATION_BLOCK
+      : CODEX_DEFAULT_MODE_COLLABORATION_BLOCK;
+  const browserRouting =
+    input.helixRole.role === "builder" ? "" : CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS;
+  const policy = renderSynaraHarnessPolicy({
+    gatewayControlAvailable: true,
+    enableComputerControl: input.enableComputerControl === true,
+    inlineVisuals: INLINE_VISUALS_ENABLED,
+    helixRole: input.helixRole.role,
+  });
+  return `${block}${browserRouting}\n\n${policy}\n\n${input.helixRole.instructions}`;
+}
+
+/**
+ * Helix sessions always carry a collaboration mode, because it is the one
+ * developer-instruction channel Codex re-sends each turn and that a resumed
+ * thread picks up. Nothing is defaulted for them: no model means an error, no
+ * effort means the provider's own, and a turn without an interaction mode
+ * keeps the mode last sent.
+ */
+function buildCodexHelixCollaborationMode(input: {
+  readonly helixRole: ProviderHelixRoleContext;
+  readonly enableComputerControl?: boolean;
+  readonly interactionMode?: ProviderInteractionMode;
+  readonly previousMode?: "default" | "plan";
+  readonly model?: string;
+  readonly effort?: string;
+}): CodexCollaborationMode {
+  const model = normalizeCodexModelSlug(input.model);
+  if (model === undefined) {
+    throw new Error(
+      `This Helix ${input.helixRole.role} has no Codex model selected, and Helix never picks one for it. Select a Codex model and try again.`,
+    );
+  }
+  const mode =
+    input.interactionMode === undefined
+      ? (input.previousMode ?? "default")
+      : input.interactionMode === "plan"
+        ? "plan"
+        : "default";
+  return {
+    mode,
+    settings: {
+      model,
+      reasoning_effort: input.effort ?? null,
+      developer_instructions: buildCodexHelixDeveloperInstructions({
+        helixRole: input.helixRole,
+        mode,
+        ...(input.enableComputerControl !== undefined
+          ? { enableComputerControl: input.enableComputerControl }
+          : {}),
+      }),
+    },
+  };
+}
+
 export function buildCodexCollaborationMode(input: {
   readonly enableComputerControl?: boolean;
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: string;
-}):
-  | {
-      mode: "default" | "plan";
-      settings: {
-        model: string;
-        reasoning_effort: string;
-        developer_instructions: string;
-      };
-    }
-  | undefined {
+  /** Helix sessions only; see `buildCodexHelixCollaborationMode`. */
+  readonly helixRole?: ProviderHelixRoleContext;
+  readonly previousMode?: "default" | "plan";
+}): CodexCollaborationMode | undefined {
+  if (input.helixRole !== undefined) {
+    return buildCodexHelixCollaborationMode({ ...input, helixRole: input.helixRole });
+  }
   if (input.interactionMode === undefined && input.enableComputerControl !== true) {
     return undefined;
   }
@@ -1442,6 +1568,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       context = {
         autoApproveSynaraTools: input.autoApproveSynaraTools === true,
+        ...(input.helixRole !== undefined ? { helixRole: input.helixRole } : {}),
         ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
         enableComputerControl:
           gatewaySessionLease !== undefined &&
@@ -1503,14 +1630,19 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         log.warn("account/read failed", { error });
       }
 
-      const normalizedModel = resolveCodexModelForAccount(
+      const normalizedModel = resolveCodexSessionModel(
         normalizeCodexModelSlug(input.model),
         context.account,
+        input.helixRole,
+      );
+      const threadConfig = withCodexHelixThreadConfig(
+        gatewaySessionLease
+          ? await this.gatewayThreadConfig(context, gatewaySessionLease.connection)
+          : undefined,
+        input.helixRole,
       );
       const sessionOverrides = {
-        ...(gatewaySessionLease
-          ? { config: await this.gatewayThreadConfig(context, gatewaySessionLease.connection) }
-          : {}),
+        ...(threadConfig ? { config: threadConfig } : {}),
         model: normalizedModel ?? null,
         ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
         cwd: resolvedCwd,
@@ -1730,23 +1862,17 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       approvalPolicy?: CodexApprovalPolicy;
       approvalsReviewer?: CodexApprovalsReviewer;
       sandboxPolicy?: CodexTurnSandboxPolicy;
-      collaborationMode?: {
-        mode: "default" | "plan";
-        settings: {
-          model: string;
-          reasoning_effort: string;
-          developer_instructions: string;
-        };
-      };
+      collaborationMode?: CodexCollaborationMode;
     } = {
       threadId: providerThreadId,
       input: turnInput,
       summary: "auto",
       ...resolveCodexTurnOverrides(context),
     };
-    const normalizedModel = resolveCodexModelForAccount(
+    const normalizedModel = resolveCodexSessionModel(
       normalizeCodexModelSlug(input.model ?? context.session.model),
       context.account,
+      context.helixRole,
     );
     if (normalizedModel) {
       turnStartParams.model = normalizedModel;
@@ -1765,6 +1891,14 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
       ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
       ...(input.effort !== undefined ? { effort: input.effort } : {}),
+      ...(context.helixRole !== undefined
+        ? {
+            helixRole: context.helixRole,
+            ...(context.helixCollaborationMode !== undefined
+              ? { previousMode: context.helixCollaborationMode }
+              : {}),
+          }
+        : {}),
     });
     if (collaborationMode) {
       if (!turnStartParams.model) {
@@ -1773,8 +1907,14 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       turnStartParams.collaborationMode = collaborationMode;
     }
 
-    context.activeInteractionMode = input.interactionMode ?? "default";
+    // A Helix turn without a mode runs in the mode it kept; record that one.
+    context.activeInteractionMode =
+      input.interactionMode ??
+      (context.helixRole !== undefined && collaborationMode ? collaborationMode.mode : "default");
     const response = await this.sendRequest(context, "turn/start", turnStartParams);
+    if (context.helixRole !== undefined && collaborationMode) {
+      context.helixCollaborationMode = collaborationMode.mode;
+    }
     const turnIdRaw = this.readString(this.readObject(this.readObject(response), "turn"), "id");
     if (!turnIdRaw) {
       throw new Error("turn/start response did not include a turn id.");
@@ -3123,7 +3263,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
           model: context.session.model ?? null,
           ...(context.serviceTier !== undefined ? { serviceTier: context.serviceTier } : {}),
           ...mapCodexRuntimeMode(context.session.runtimeMode),
-          config: await this.gatewayThreadConfig(context, replacement.connection),
+          config: withCodexHelixThreadConfig(
+            await this.gatewayThreadConfig(context, replacement.connection),
+            context.helixRole,
+          ),
         }),
       );
       if (
@@ -4686,9 +4829,15 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       !context.stopping &&
       context.activeInteractionMode === "default" &&
       ((activeSynaraToolTurn &&
-        (context.autoApproveSynaraTools === true ||
-          context.session.runtimeMode === "full-access") &&
-        isSynaraGatewayToolName(synaraToolName)) ||
+        ((context.session.runtimeMode === "full-access" &&
+          isSynaraGatewayToolName(synaraToolName)) ||
+          shouldAutoApproveGatewayToolForSession(
+            {
+              autoApproveSynaraTools: context.autoApproveSynaraTools,
+              helixRole: context.helixRole,
+            },
+            synaraToolName,
+          ))) ||
         shouldAllowSynaraComputerProviderTool({
           computerControlEnabled: context.enableComputerControl === true,
           activeTurn: activeSynaraToolTurn,

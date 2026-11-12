@@ -4,9 +4,11 @@ import {
   computerToolNameFromProviderPermission,
   isSynaraComputerToolFamilyName,
   isSynaraGatewayToolCall,
+  isHelixGatewayToolName,
   isSynaraGatewayToolName,
   qualifiedSynaraComputerToolName,
   shouldAllowSynaraComputerProviderTool,
+  shouldAutoApproveSynaraGatewayTool,
 } from "./computerToolPermission.ts";
 
 describe("Synara Computer provider permission", () => {
@@ -214,5 +216,55 @@ describe("Synara gateway tool permission name", () => {
     expect(isSynaraGatewayToolCall({ rawInput: { _toolName: "synara_synara_send_message" } })).toBe(
       true,
     );
+  });
+});
+
+describe("Helix tool auto-approval", () => {
+  const role = { role: "lead", pairId: "p", promptVersion: "v", instructions: "x" };
+
+  it("approves only server-qualified helix_* tools for a Helix participant", () => {
+    expect(isHelixGatewayToolName("mcp__synara__helix_delegate")).toBe(true);
+    expect(isHelixGatewayToolName("synara_helix_report")).toBe(true);
+    expect(isHelixGatewayToolName("helix_delegate")).toBe(false);
+    expect(isHelixGatewayToolName("mcp__other__helix_delegate")).toBe(false);
+    expect(
+      shouldAutoApproveSynaraGatewayTool({ helixRole: role }, "mcp__synara__helix_delegate"),
+    ).toBe(true);
+    expect(
+      shouldAutoApproveSynaraGatewayTool({ helixRole: role }, "mcp__synara__synara_create_thread"),
+    ).toBe(false);
+    expect(
+      shouldAutoApproveSynaraGatewayTool({ helixRole: role }, "mcp__synara__computer_click"),
+    ).toBe(false);
+  });
+
+  it("is role-exact: a Lead never auto-approves helix_report, a Builder only helix_report", () => {
+    const lead = role;
+    const builder = { ...role, role: "builder" };
+    const approve = (helixRole: unknown, tool: string) =>
+      shouldAutoApproveSynaraGatewayTool({ helixRole }, `mcp__synara__${tool}`);
+    for (const tool of ["helix_delegate", "helix_wait", "helix_inspect", "helix_review"]) {
+      expect(approve(lead, tool), tool).toBe(true);
+      expect(approve(builder, tool), tool).toBe(false);
+    }
+    expect(approve(lead, "helix_report")).toBe(false);
+    expect(approve(builder, "helix_report")).toBe(true);
+    // Unknown helix_* names and unknown roles approve nothing.
+    expect(approve(lead, "helix_unknown")).toBe(false);
+    expect(approve(builder, "helix_unknown")).toBe(false);
+    expect(approve({ ...role, role: "reviewer" }, "helix_report")).toBe(false);
+    expect(approve(null, "helix_report")).toBe(false);
+    expect(approve("lead", "helix_delegate")).toBe(false);
+  });
+
+  it("keeps the Hub coordinator rule and changes nothing for other sessions", () => {
+    expect(
+      shouldAutoApproveSynaraGatewayTool(
+        { autoApproveSynaraTools: true },
+        "mcp__synara__synara_create_thread",
+      ),
+    ).toBe(true);
+    expect(shouldAutoApproveSynaraGatewayTool({}, "mcp__synara__synara_create_thread")).toBe(false);
+    expect(shouldAutoApproveSynaraGatewayTool({}, "mcp__synara__helix_delegate")).toBe(false);
   });
 });

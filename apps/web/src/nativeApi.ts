@@ -1,5 +1,6 @@
 import {
   WS_GITHUB_PROJECT_PROVISIONING_CAPABILITY,
+  WS_HELIX_PAIRS_CAPABILITY,
   WS_PROJECT_FILE_WATCH_CAPABILITY,
   type NativeApi,
 } from "@synara/contracts";
@@ -40,6 +41,9 @@ export function readNativeApiServerCapability(capability: string): boolean {
     }
     if (capability === WS_PROJECT_FILE_WATCH_CAPABILITY) {
       return typeof window.nativeApi.projects?.onFileChange === "function";
+    }
+    if (capability === WS_HELIX_PAIRS_CAPABILITY) {
+      return typeof window.nativeApi.helix?.listPairs === "function";
     }
     return false;
   }

@@ -22,6 +22,8 @@ import type {
 import {
   ApprovalRequestId,
   EventId,
+  HelixPairId,
+  type ProviderHelixRoleContext,
   type ProviderInstanceId,
   type ServerSettings,
   type ProviderKind,
@@ -90,6 +92,11 @@ import {
   ProviderSessionDirectory,
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
+import {
+  makeProviderHelixRoleResolver,
+  ProviderHelixRoleResolver,
+  type ProviderHelixRoleResolverShape,
+} from "../Services/ProviderHelixRoleResolver.ts";
 import {
   credentialsFingerprintForProvider,
   makeProviderServiceLive as makeProviderServiceLiveBase,
@@ -637,6 +644,7 @@ function makeProviderServiceLayer(
     readonly includeRestartRollbackDroid?: boolean;
     readonly includePi?: boolean;
     readonly includeOpenCode?: boolean;
+    readonly helixRoleResolver?: ProviderHelixRoleResolverShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -702,6 +710,11 @@ function makeProviderServiceLayer(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(serverSettingsLayer),
+      Layer.provide(
+        providers?.helixRoleResolver
+          ? Layer.succeed(ProviderHelixRoleResolver, providers.helixRoleResolver)
+          : Layer.empty,
+      ),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -2570,6 +2583,99 @@ it.effect(
     }),
 );
 
+const helixCurrentRoles = new Map<string, ProviderHelixRoleContext>();
+const helixRoleResolver = makeProviderHelixRoleResolver();
+Effect.runSync(
+  helixRoleResolver.register((threadId) => Effect.succeed(helixCurrentRoles.get(threadId) ?? null)),
+);
+const helixRouting = makeProviderServiceLayer(undefined, { helixRoleResolver });
+
+helixRouting.layer("ProviderServiceLive Helix role on self-initiated restarts", (it) => {
+  const builderRole = (instructions: string): ProviderHelixRoleContext => ({
+    role: "builder",
+    pairId: HelixPairId.makeUnsafe("helix-pair:restart"),
+    promptVersion: "helix-roles/2",
+    instructions,
+  });
+
+  it.effect("recovers a session without the role once the pair is disabled", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-helix-disabled-recovery");
+      const role = builderRole("## Helix: you are the Builder");
+      helixCurrentRoles.set(threadId, role);
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        helixRole: role,
+      });
+
+      // The pair is disabled; the reactor has not relaunched the session yet.
+      helixCurrentRoles.delete(threadId);
+      yield* helixRouting.codex.stopSession(threadId);
+      yield* provider.sendTurn({ threadId, input: "after disable", attachments: [] });
+
+      const recoveredStart = helixRouting.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.strictEqual(recoveredStart?.threadId, threadId);
+      assert.isFalse(recoveredStart !== undefined && "helixRole" in recoveredStart);
+      const recovered = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.isFalse("helixRole" in asRuntimePayloadRecord(recovered?.runtimePayload));
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("recovers a session with the pair's current role text", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-helix-updated-recovery");
+      const before = builderRole("## Helix: you are the Builder (old)");
+      const after = builderRole("## Helix: you are the Builder (new)");
+      helixCurrentRoles.set(threadId, before);
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        helixRole: before,
+      });
+
+      helixCurrentRoles.set(threadId, after);
+      yield* helixRouting.codex.stopSession(threadId);
+      yield* provider.sendTurn({ threadId, input: "after upgrade", attachments: [] });
+
+      const recoveredStart = helixRouting.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepStrictEqual(recoveredStart?.helixRole, after);
+      const recovered = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.deepStrictEqual(asRuntimePayloadRecord(recovered?.runtimePayload).helixRole, after);
+      helixCurrentRoles.delete(threadId);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("never asks Helix about a session that had no role", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-ordinary-recovery-with-resolver");
+      // Even if Helix now names a role, an ordinary session's recovery keeps
+      // its launch options; the reactor relaunches participants itself.
+      helixCurrentRoles.set(threadId, builderRole("## Helix: you are the Builder"));
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* helixRouting.codex.stopSession(threadId);
+      yield* provider.sendTurn({ threadId, input: "ordinary", attachments: [] });
+      const recoveredStart = helixRouting.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.isFalse(recoveredStart !== undefined && "helixRole" in recoveredStart);
+      helixCurrentRoles.delete(threadId);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+});
+
 routing.layer("ProviderServiceLive routing", (it) => {
   it.effect("does not stop a replacement runtime even when its createdAt is unchanged", () =>
     Effect.gen(function* () {
@@ -3384,6 +3490,60 @@ routing.layer("ProviderServiceLive routing", (it) => {
         20,
         "recovered runtime ready event accepted",
       );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("carries a Helix role through recovery and clears it on a role-less launch", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-helix-recovery");
+      const helixRole = {
+        role: "builder" as const,
+        pairId: HelixPairId.makeUnsafe("helix-pair:recovery"),
+        promptVersion: "helix-roles/1",
+        instructions: "## Helix: you are the Builder",
+      };
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        helixRole,
+      });
+      const persisted = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.deepStrictEqual(
+        asRuntimePayloadRecord(persisted?.runtimePayload).helixRole,
+        helixRole,
+      );
+
+      // Recovery (also used for proactive credential rotation after a turn)
+      // rebuilds the start input from the binding: the role must come back.
+      yield* routing.codex.stopSession(threadId);
+      yield* provider.sendTurn({ threadId, input: "next brief", attachments: [] });
+      const recoveredStart = routing.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepStrictEqual(recoveredStart?.helixRole, helixRole);
+      const recovered = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.deepStrictEqual(
+        asRuntimePayloadRecord(recovered?.runtimePayload).helixRole,
+        helixRole,
+      );
+
+      // A launch without a role (the pair was disabled) clears it, so a later
+      // recovery cannot revive the old instructions.
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const cleared = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.isFalse("helixRole" in asRuntimePayloadRecord(cleared?.runtimePayload));
+      yield* routing.codex.stopSession(threadId);
+      yield* provider.sendTurn({ threadId, input: "ordinary turn", attachments: [] });
+      const ordinaryRecovery = routing.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.isUndefined(ordinaryRecovery?.helixRole);
+
       yield* provider.stopSession({ threadId });
     }),
   );

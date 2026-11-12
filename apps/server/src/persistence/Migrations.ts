@@ -165,6 +165,10 @@ import Migration0134 from "./Migrations/134_ProjectionThreadsForkSourceMessage.t
 import Migration0135 from "./Migrations/135_ProjectionMessageTurnActivityIndex.ts";
 // Slots 136–140 are already released in the Remote lineage; new common migrations follow them.
 import Migration0141 from "./Migrations/141_ProjectionThreadsUsageLimitRecovery.ts";
+import Migration0143 from "./Migrations/143_HelixPairs.ts";
+import Migration0144 from "./Migrations/144_HelixRetiredBuilders.ts";
+import Migration0145 from "./Migrations/145_HelixStopRequests.ts";
+import Migration0146 from "./Migrations/146_HelixAppliedMessages.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -323,6 +327,10 @@ export const migrationEntries = [
   [140, "RemoteAccessControls", Migration0140],
   [141, "ProjectionThreadsUsageLimitRecovery", Migration0141],
   [142, "AuthAccessOrigin", Migration0142],
+  [143, "HelixPairs", Migration0143],
+  [144, "HelixRetiredBuilders", Migration0144],
+  [145, "HelixStopRequests", Migration0145],
+  [146, "HelixAppliedMessages", Migration0146],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

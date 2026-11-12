@@ -46,6 +46,9 @@ import {
   WsDeviceRpcGroup,
   WsFeatureRpcGroup,
   WsProjectAgentRpcGroup,
+  WsHelixRpcGroup,
+  HELIX_WS_METHODS,
+  HELIX_RPC_ERROR_CODES,
   WsRpcError,
   PullRequestsUnavailableError,
   type DeviceEvent,
@@ -69,7 +72,18 @@ import {
   type ServerSettings,
 } from "@synara/contracts";
 import { clamp } from "effect/Number";
-import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Scope, Stream } from "effect";
+import {
+  Cause,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Queue,
+  Schema,
+  Scope,
+  Stream,
+} from "effect";
 import * as Arr from "effect/Array";
 import { Headers, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { type RpcGroup, RpcSerialization, RpcServer } from "effect/unstable/rpc";
@@ -242,6 +256,12 @@ import { makeOwnerThreadDiagnosticReader } from "./diagnostics/ownerThreadDiagno
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore";
 import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderRuntimeEvents";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
+import {
+  HelixService,
+  type HelixServiceError,
+  type HelixServiceShape,
+} from "./helix/Services/HelixService";
+import { HelixCoordinatorService } from "./helix/Services/HelixCoordinator";
 import { connectorsForPairedClient } from "./mcpConnectors/pairedClientView";
 import {
   WsRequestAdmissionMiddleware,
@@ -249,6 +269,7 @@ import {
 } from "./wsRequestAdmission";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
 import {
+  CurrentWsSessionRole,
   withoutWsConnectionSessionHeaders,
   WS_CONNECTION_SESSION_HEADER,
   WsConnectionSessions,
@@ -321,6 +342,7 @@ const AdmittedWsFeatureRpcGroup = WsFeatureRpcGroup.add(WsServerSubscribeShellRp
   .merge(WsDeviceRpcGroup)
   .merge(WsComputerRpcGroup)
   .merge(WsProjectAgentRpcGroup)
+  .merge(WsHelixRpcGroup)
   .middleware(WsRequestAdmissionMiddleware);
 /**
  * The group the WebSocket RPC server serves, for wsShellSnapshotWire.rpc.test.ts.
@@ -545,6 +567,33 @@ const makeWsRpcHandlersLayer = () =>
       const todoService = yield* TodoService;
       const projectAgentService = yield* ProjectAgentService;
       const projectAgentRepository = yield* ProjectAgentRepository;
+      // Optional so harnesses without Helix still build; absent means HELIX_UNAVAILABLE.
+      const helixService = Option.getOrUndefined(yield* Effect.serviceOption(HelixService));
+      const helixHooks = Option.getOrUndefined(
+        yield* Effect.serviceOption(HelixCoordinatorService),
+      );
+      const helixUnavailable = () =>
+        new WsRpcError({
+          message: "Helix is not available on this server.",
+          code: HELIX_RPC_ERROR_CODES.unavailable,
+          retryable: false,
+        });
+      const helixRpc = <A>(
+        run: (service: HelixServiceShape) => Effect.Effect<A, HelixServiceError>,
+      ): Effect.Effect<A, WsRpcError> =>
+        helixService === undefined
+          ? Effect.fail(helixUnavailable())
+          : run(helixService).pipe(
+              Effect.mapError(
+                (error) =>
+                  new WsRpcError({
+                    message: error.message,
+                    code: error.code,
+                    ...(error.reason === undefined ? {} : { reason: error.reason }),
+                    retryable: false,
+                  }),
+              ),
+            );
       const config = yield* ServerConfig;
       const editorLanguages = new EditorLanguageService();
       const editorDebug = new EditorDebugService(config.stateDir);
@@ -1619,7 +1668,44 @@ const makeWsRpcHandlersLayer = () =>
                   threadId: normalizedCommand.threadId,
                 });
               }
-              const result = yield* dispatchOrchestrationCommand(normalizedCommand);
+              // Helix: refuse what a participant must not take; a user Stop of
+              // either participant also stops the pair (best-effort, never
+              // blocking the user's own command).
+              const helixIntercept =
+                helixHooks === undefined
+                  ? undefined
+                  : yield* helixHooks
+                      .interceptClientCommand(normalizedCommand, {
+                        // Exactly the authority of the helix.* RPCs (owner only).
+                        mayConfigureHelix: (yield* CurrentWsSessionRole) === "owner",
+                      })
+                      .pipe(
+                        Effect.mapError(
+                          (error) =>
+                            new WsRpcError({
+                              message: error.message,
+                              code: error.code,
+                              ...(error.reason === undefined ? {} : { reason: error.reason }),
+                              retryable: false,
+                            }),
+                        ),
+                      );
+              const result = yield* dispatchOrchestrationCommand(normalizedCommand).pipe(
+                // Not accepted (refused, failed or interrupted): a pairing it carried
+                // is dropped here. If the engine did accept it before an interruption,
+                // the reactor applies it when it reaches the message's turn.
+                // Accepted: its Helix effects (pairing, goal start) run in the exit
+                // handler, so a disconnect right after acceptance cannot skip them.
+                Effect.onExit((exit) =>
+                  helixIntercept === undefined
+                    ? Effect.void
+                    : exit._tag === "Success"
+                      ? helixIntercept.afterAccepted
+                      : Cause.hasInterruptsOnly(exit.cause)
+                        ? Effect.void
+                        : (helixIntercept.cancel ?? Effect.void),
+                ),
+              );
               // Only scaffold managed workspace-root subdirectories (Inbox/Outbox/work/outputs)
               // AFTER the decider has accepted the command. A rejected dispatch (e.g. a
               // cross-kind workspace-root ownership conflict) must never mutate the filesystem.
@@ -1629,6 +1715,20 @@ const makeWsRpcHandlersLayer = () =>
               if (normalizedCommand.type === "thread.archive") {
                 yield* Effect.forkDetach(pruneManagedWorktrees);
               }
+              // Tell the client what became of a Helix pairing the message carried.
+              const helixPairing =
+                helixIntercept?.pairing ??
+                (helixHooks === undefined &&
+                (normalizedCommand.type === "thread.turn.start" ||
+                  normalizedCommand.type === "thread.message.edit-and-resend") &&
+                normalizedCommand.helix !== undefined
+                  ? {
+                      status: "not_applied" as const,
+                      reason: "unavailable" as const,
+                      message: "Helix is not available on this server.",
+                    }
+                  : undefined);
+              if (helixPairing !== undefined) return { ...result, helixPairing };
               return result;
             }),
             "Failed to dispatch orchestration command",
@@ -1742,7 +1842,16 @@ const makeWsRpcHandlersLayer = () =>
             // written while startup is still claiming the previous quit's record.
             runtimeStartup.enqueueCommand(
               prepareQuitResume({
-                request: input,
+                // A Helix Builder runs only under Helix: never auto-continue it after quit.
+                request:
+                  helixHooks === undefined
+                    ? input
+                    : {
+                        ...input,
+                        threadIds: input.threadIds.filter(
+                          (threadId) => helixHooks.roleOf(threadId)?.role !== "builder",
+                        ),
+                      },
                 recordPath: config.quitResumeStatePath,
                 getReadModel: orchestrationEngine.getReadModel,
                 dispatch: dispatchOrchestrationCommand,
@@ -2564,6 +2673,20 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(
             Effect.gen(function* () {
               const { commandId, threadId, ...gitInput } = input;
+              if (helixHooks !== undefined) {
+                // The git operation acts on input.cwd: guard the directory too.
+                yield* helixHooks.assertMayMoveWorkspace(threadId, gitInput.cwd).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new WsRpcError({
+                        message: error.message,
+                        code: error.code,
+                        ...(error.reason === undefined ? {} : { reason: error.reason }),
+                        retryable: false,
+                      }),
+                  ),
+                );
+              }
               const operation = yield* beginGitHandoff(input);
               if (operation.phase === "pending" || operation.phase === "uncertain") {
                 return yield* new WsRpcError({
@@ -3481,6 +3604,43 @@ const makeWsRpcHandlersLayer = () =>
             projectAgentService.resolveWorkerAlert(input, { kind: "user" }),
             "Failed to resolve worker alert",
           ),
+        [HELIX_WS_METHODS.capabilities]: () => helixRpc((helix) => helix.capabilities()),
+        [HELIX_WS_METHODS.listPairs]: () => helixRpc((helix) => helix.listPairs()),
+        [HELIX_WS_METHODS.getPair]: (input) => helixRpc((helix) => helix.getPair(input)),
+        // Enabling, disabling and reconfiguring choose providers and change what runs
+        // unattended: owner sessions only. Pause, resume and stop stay open to every
+        // admitted session so any connected client can stop the pair.
+        [HELIX_WS_METHODS.enable]: (input) =>
+          requireWsOwnerSession.pipe(Effect.andThen(helixRpc((helix) => helix.enable(input)))),
+        [HELIX_WS_METHODS.disable]: (input) =>
+          requireWsOwnerSession.pipe(Effect.andThen(helixRpc((helix) => helix.disable(input)))),
+        [HELIX_WS_METHODS.updateConfig]: (input) =>
+          requireWsOwnerSession.pipe(
+            Effect.andThen(helixRpc((helix) => helix.updateConfig(input))),
+          ),
+        [HELIX_WS_METHODS.pause]: (input) => helixRpc((helix) => helix.pause(input)),
+        [HELIX_WS_METHODS.resume]: (input) => helixRpc((helix) => helix.resume(input)),
+        [HELIX_WS_METHODS.stop]: (input) => helixRpc((helix) => helix.stop(input)),
+        // Removal discards a pair outright (the way out of quarantine): owner only.
+        [HELIX_WS_METHODS.removePair]: (input) =>
+          requireWsOwnerSession.pipe(Effect.andThen(helixRpc((helix) => helix.removePair(input)))),
+        [HELIX_WS_METHODS.subscribe]: (input, { clientId }) =>
+          helixService === undefined
+            ? Stream.fail(helixUnavailable())
+            : streamAdmission.guard(
+                clientId,
+                { key: `helix.events:${input.leadThreadId ?? "*"}` },
+                helixService.streamEvents(input).pipe(
+                  Stream.mapError(
+                    (error) =>
+                      new WsRpcError({
+                        message: error.message,
+                        code: error.code,
+                        retryable: false,
+                      }),
+                  ),
+                ),
+              ),
         [WS_METHODS.subscribeProjectAgentEvents]: (input, { clientId }) =>
           streamAdmission.guard(
             clientId,

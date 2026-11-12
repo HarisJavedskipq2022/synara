@@ -141,6 +141,8 @@ import {
 import { ProviderHealth } from "../../provider/Services/ProviderHealth.ts";
 import { isServerGroupsEnabled } from "../../projectAgent/groupsBetaGate.ts";
 import { ProjectAgentService } from "../../projectAgent/Services/ProjectAgentService.ts";
+import { parseHelixMessageId } from "../../helix/messages.ts";
+import { HelixCoordinatorService } from "../../helix/Services/HelixCoordinator.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import { resolveProviderDispatchAttachments } from "../../provider/providerAttachmentPaths.ts";
 import { OrchestrationEventDeliveryRepositoryLive } from "../../persistence/Layers/OrchestrationEventDeliveries.ts";
@@ -1053,6 +1055,11 @@ const make = Effect.gen(function* () {
   // layer environment, so per-turn serviceOption lookups would see an empty
   // context.
   const projectAgentService = yield* Effect.serviceOption(ProjectAgentService);
+  // Helix hooks (docs/plans/helix-prototype.md): absent or inert for every
+  // thread that is not a Helix participant.
+  const helixCoordinator = yield* Effect.serviceOption(HelixCoordinatorService);
+  const isHelixBuilderThread = (threadId: string) =>
+    Option.isSome(helixCoordinator) && helixCoordinator.value.roleOf(threadId)?.role === "builder";
   const providerHealth = yield* ProviderHealth;
   const pendingInteractions = yield* ProjectionPendingInteractionRepository;
   const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
@@ -1162,6 +1169,8 @@ const make = Effect.gen(function* () {
   // was actually spawned with so a changed value restarts the runtime instead
   // of silently reusing a session provisioned under the old approval set.
   const threadSessionAutoApproveSynaraTools = new Map<string, boolean>();
+  // The Helix role a thread's live session was started with, as a stable key.
+  const threadSessionHelixRoleKeys = new Map<string, string | null>();
   // Seeded from the engine's in-memory command read model, not a second snapshot query.
   // The engine loads that model once after the projection bootstrap and keeps it current
   // as commands commit, so reading it here is both free and strictly fresher than
@@ -1940,6 +1949,33 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * A suppressed Helix turn never reaches the provider, but its turn-start
+   * event already projected the session as starting. Return it to rest so the
+   * thread does not look busy forever.
+   */
+  const settleSuppressedHelixTurnSession = Effect.fnUntraced(function* (
+    thread: OrchestrationThreadShell,
+  ) {
+    const session = thread.session;
+    if (!session || session.status !== "starting" || session.activeTurnId !== null) return;
+    const createdAt = new Date().toISOString();
+    const live = yield* resolveLiveProviderSession(thread.id);
+    yield* setThreadSession({
+      threadId: thread.id,
+      expectedSession: session,
+      session: { ...session, status: live ? "ready" : "stopped", updatedAt: createdAt },
+      createdAt,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("helix: could not settle a suppressed turn's session", {
+          threadId: thread.id,
+          error: String(error),
+        }),
+      ),
+    );
+  });
+
   // Thread detail for the sites that read messages, checkpoints or plans. No
   // command path here reads the activity timeline, so its query is skipped.
   const resolveThread = Effect.fnUntraced(function* (threadId: ThreadId) {
@@ -2450,6 +2486,7 @@ const make = Effect.gen(function* () {
     const desiredRuntimeMode = options?.runtimeMode ?? thread.runtimeMode;
     const previousAutoApproveSynaraTools =
       threadSessionAutoApproveSynaraTools.get(threadId) ?? false;
+    const previousHelixRoleKey = threadSessionHelixRoleKeys.get(threadId) ?? null;
     const currentProvider: ProviderKind | undefined = Schema.is(ProviderKind)(
       thread.session?.providerName,
     )
@@ -2658,6 +2695,17 @@ const make = Effect.gen(function* () {
             ),
             Effect.catch(() => Effect.succeed(false)),
           );
+    // Role instructions for a Helix participant; null for every other thread.
+    const helixRole = Option.isSome(helixCoordinator)
+      ? yield* helixCoordinator.value.sessionRoleFor(threadId)
+      : null;
+    const helixRoleKey =
+      helixRole === null
+        ? null
+        : `${helixRole.role}:${helixRole.pairId}:${helixRole.promptVersion}`;
+    // Enabling or disabling Helix restarts the session at its next turn start,
+    // so the Lead's tool list and instructions follow the pair.
+    const helixRoleChanged = helixRoleKey !== previousHelixRoleKey;
     const providerSessionOptions = {
       threadId,
       providerInstanceId: desiredProviderInstanceId,
@@ -2669,6 +2717,7 @@ const make = Effect.gen(function* () {
         ? { enableComputerControl: options.enableComputerControl }
         : {}),
       ...(autoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
+      ...(helixRole !== null ? { helixRole } : {}),
       runtimeMode: desiredRuntimeMode,
     };
     const autoApproveSynaraToolsChanged = autoApproveSynaraTools !== previousAutoApproveSynaraTools;
@@ -2839,6 +2888,7 @@ const make = Effect.gen(function* () {
         !shouldRestartForModelSelectionChange &&
         !computerControlChanged &&
         !autoApproveSynaraToolsChanged &&
+        !helixRoleChanged &&
         !providerOptionsChanged
       ) {
         return {
@@ -2870,7 +2920,8 @@ const make = Effect.gen(function* () {
         !providerOptionsChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange &&
-        !autoApproveSynaraToolsChanged;
+        !autoApproveSynaraToolsChanged &&
+        !helixRoleChanged;
       const deferComputerControlRestart = {
         activeSessionBeforeEnsure,
         activeSession: reusableSession,
@@ -3064,6 +3115,7 @@ const make = Effect.gen(function* () {
         threadSessionModelSelections.set(threadId, desiredModelSelection);
         threadSessionComputerControl.set(threadId, forkComputerControl);
         threadSessionAutoApproveSynaraTools.set(threadId, autoApproveSynaraTools);
+        threadSessionHelixRoleKeys.set(threadId, helixRoleKey);
         setThreadProviderOptions(threadId, resolvedProviderOptions);
         const forkedSession =
           (yield* resolveActiveSession(threadId)) ??
@@ -3166,6 +3218,7 @@ const make = Effect.gen(function* () {
     // the spawning dispatch carried no explicit model selection.
     threadSessionModelSelections.set(threadId, desiredModelSelection);
     threadSessionAutoApproveSynaraTools.set(threadId, autoApproveSynaraTools);
+    threadSessionHelixRoleKeys.set(threadId, helixRoleKey);
     if (options?.enableComputerControl !== undefined) {
       threadSessionComputerControl.set(threadId, options.enableComputerControl);
     }
@@ -4162,6 +4215,45 @@ const make = Effect.gen(function* () {
               });
             }
           }
+          // Helix, again immediately before the provider send: a Stop that
+          // landed after admission still wins. This is also the only gate for
+          // server turns that never pass a turn-start event (goal continuation,
+          // usage-limit recovery). An absent origin counts as server-originated.
+          if (Option.isSome(helixCoordinator)) {
+            const helixId = parseHelixMessageId(input.messageId) !== null;
+            if (helixId) {
+              // A withheld Helix turn is recorded as suppressed by Helix and is
+              // not a provider failure: the caller settles the session quietly.
+              if (
+                !(yield* helixCoordinator.value.admitAutomaticTurn({
+                  threadId: input.threadId,
+                  messageId: input.messageId,
+                  dispatchOrigin: input.dispatchOrigin,
+                }))
+              ) {
+                helixWithheldTurns.add(input.messageId);
+                return yield* new ProviderAdapterValidationError({
+                  provider: selectedProvider,
+                  operation: "thread.turn.start",
+                  issue: "Helix withheld this turn before delivery.",
+                });
+              }
+            } else if (
+              helixCoordinator.value.roleOf(input.threadId) !== null &&
+              !(yield* helixCoordinator.value.shouldSendServerTurn({
+                threadId: input.threadId,
+                messageId: input.messageId,
+                dispatchOrigin: input.dispatchOrigin,
+              }))
+            ) {
+              // Visible to the turn's owner (e.g. "Goal continuation failed").
+              return yield* new ProviderAdapterValidationError({
+                provider: selectedProvider,
+                operation: "thread.turn.start",
+                issue: "A Helix Builder runs only its Lead's briefs.",
+              });
+            }
+          }
           const turnInput = {
             ...providerTurnInput,
             ...(messageText ? { input: messageText } : {}),
@@ -4719,7 +4811,24 @@ const make = Effect.gen(function* () {
     return yield* resolveThreadShell(threadId);
   });
 
-  const dispatchTurnForThread = Effect.fnUntraced(function* (
+  /** Helix turns withheld at the pre-send check: settled quietly, not failed. */
+  const helixWithheldTurns = new Set<string>();
+  const dispatchTurnForThread = (input: Parameters<typeof dispatchTurnForThreadCore>[0]) =>
+    dispatchTurnForThreadRouted(input).pipe(
+      Effect.catchIf(
+        (error) =>
+          error instanceof ProviderAdapterValidationError &&
+          helixWithheldTurns.has(input.messageId),
+        () =>
+          Effect.gen(function* () {
+            helixWithheldTurns.delete(input.messageId);
+            const thread = yield* resolveThreadShell(input.threadId);
+            if (thread) yield* settleSuppressedHelixTurnSession(thread);
+            return undefined;
+          }),
+      ),
+    );
+  const dispatchTurnForThreadRouted = Effect.fnUntraced(function* (
     input: Parameters<typeof dispatchTurnForThreadCore>[0],
   ) {
     const thread = yield* resolveThreadShell(input.threadId);
@@ -4845,6 +4954,10 @@ const make = Effect.gen(function* () {
     if (!isTemporaryWorktreeBranch(input.branch)) {
       return;
     }
+    // A Helix Builder works on its Lead's branch; only the Lead may name it.
+    if (isHelixBuilderThread(input.threadId)) {
+      return;
+    }
 
     const thread = yield* resolveFirstTurnThread(
       input.threadId,
@@ -4920,6 +5033,10 @@ const make = Effect.gen(function* () {
     readonly modelSelection?: ModelSelection;
     readonly providerOptions?: ProviderStartOptions;
   }) {
+    // A Helix Builder's title is set by Helix; the brief is not a chat opener.
+    if (isHelixBuilderThread(input.threadId)) {
+      return;
+    }
     const expectedTitleSequence = yield* orchestrationEngine.getThreadTitleHighWaterSequence(
       input.threadId,
     );
@@ -5082,8 +5199,46 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      // Helix: a user message may carry a pairing that is being applied right
+      // now; wait for it (bounded) so this turn's session starts with its role.
+      if (Option.isSome(helixCoordinator)) {
+        yield* helixCoordinator.value.awaitMessagePairing(
+          event.payload.threadId,
+          event.payload.messageId,
+        );
+      }
       const thread = yield* resolveThreadShell(event.payload.threadId);
       if (!thread || isExpiredSidechat(thread)) {
+        return;
+      }
+      // Helix: a brief or wake runs only while its pair is unheld and its epoch
+      // current (this also catches turns queued before a Stop, at promotion), and
+      // a Helix participant runs no other server turn it should not. Threads
+      // outside a pair with ordinary message ids skip the check entirely.
+      if (
+        Option.isSome(helixCoordinator) &&
+        (parseHelixMessageId(event.payload.messageId) !== null ||
+          helixCoordinator.value.roleOf(event.payload.threadId) !== null) &&
+        !(yield* helixCoordinator.value.admitAutomaticTurn({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          dispatchOrigin: event.payload.dispatchOrigin ?? "user",
+        }))
+      ) {
+        yield* settleSuppressedHelixTurnSession(thread);
+        // A non-Helix turn aimed at a Builder (automation, Hub, kanban…) is
+        // refused visibly, never dropped in silence.
+        if (parseHelixMessageId(event.payload.messageId) === null) {
+          yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Turn refused by Helix",
+            detail: "A Helix Builder runs only its Lead's briefs. Send this to the Lead instead.",
+            turnId: null,
+            messageId: event.payload.messageId,
+            createdAt: event.payload.createdAt,
+          }).pipe(Effect.ignore);
+        }
         return;
       }
       if (
@@ -5513,6 +5668,26 @@ const make = Effect.gen(function* () {
       }
       if (startedTurn && isPendingQueuedDispatch) {
         yield* bindPendingQueuedDispatchToTurn(startedTurn.turnId);
+      }
+      // Helix, once more with the turn id bound: a Stop racing the send is
+      // honoured by interrupting the turn that just started.
+      if (
+        startedTurn &&
+        Option.isSome(helixCoordinator) &&
+        parseHelixMessageId(event.payload.messageId) !== null &&
+        !(yield* helixCoordinator.value.shouldSendServerTurn({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          dispatchOrigin: event.payload.dispatchOrigin ?? "user",
+        }))
+      ) {
+        yield* interruptProviderTurn({
+          controlRequestId: `helix-stale:${turnStartKeyForEvent(event)}`,
+          preserveQueuedWork: true,
+          threadId: event.payload.threadId,
+          turnId: startedTurn.turnId,
+          createdAt: new Date().toISOString(),
+        });
       }
       if (startedTurn && acceptedCacheReview) {
         yield* setClaudeCacheReview(event.payload.threadId, null, acceptedCacheReview.reviewId);

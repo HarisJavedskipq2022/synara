@@ -112,6 +112,9 @@ interface ComposerCapsulePopoverProps {
   title?: string | undefined;
   testId?: string;
   popupTestId?: string;
+  /** Controlled open state, for a panel other surfaces open. Uncontrolled when omitted. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   /** The full panel. A function receives `close` for actions that hand focus back. */
   children: ReactNode | ((close: () => void) => ReactNode);
 }
@@ -124,9 +127,16 @@ export function ComposerCapsulePopover({
   title,
   testId,
   popupTestId,
+  open: openProp,
+  onOpenChange,
   children,
 }: ComposerCapsulePopoverProps) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = openProp ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (openProp === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const triggerRef = useRef<HTMLButtonElement>(null);
   const close = () => setOpen(false);
   return (

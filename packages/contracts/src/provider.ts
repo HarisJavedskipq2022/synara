@@ -24,6 +24,7 @@ import {
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "./orchestration";
+import { ProviderHelixRoleContext } from "./helix";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
 
@@ -89,6 +90,14 @@ export const ProviderSessionStartInput = Schema.Struct({
    * group coordinator. File edits and shell commands still ask.
    */
   autoApproveSynaraTools: Schema.optional(Schema.Boolean),
+  /**
+   * Set by the server only when this thread is a Helix participant
+   * (docs/plans/helix-prototype.md). Adapters append `instructions` through
+   * their native instruction channel and vary provider-native delegation
+   * guidance by `role`. Carries no authority: gateway capabilities come from
+   * the server-side credential. A change restarts the session.
+   */
+  helixRole: Schema.optional(ProviderHelixRoleContext),
   runtimeMode: RuntimeMode,
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;

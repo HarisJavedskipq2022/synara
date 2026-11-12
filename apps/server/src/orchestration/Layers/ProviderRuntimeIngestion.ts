@@ -2,6 +2,7 @@ import {
   startComputerTurnTiming,
   endComputerTurnTiming,
 } from "../../computer/computerTurnTiming.ts";
+import { HelixCoordinatorService } from "../../helix/Services/HelixCoordinator.ts";
 import {
   type AssistantDeliveryMode,
   CommandId,
@@ -855,6 +856,10 @@ const make = Effect.gen(function* () {
   const computerService = yield* Effect.serviceOption(ComputerService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const recoverySettings = yield* Effect.serviceOption(ServerSettingsService);
+  // A Helix Builder runs only Helix briefs: it is never armed for usage-limit recovery.
+  const helixHooks = yield* Effect.serviceOption(HelixCoordinatorService);
+  const isHelixBuilder = (threadId: string) =>
+    Option.isSome(helixHooks) && helixHooks.value.roleOf(threadId)?.role === "builder";
   const recoveryLiveAfter = new Date().toISOString();
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
@@ -3120,7 +3125,8 @@ const make = Effect.gen(function* () {
             event.payload.state === "failed" &&
             event.payload.usageLimit?.resetAt &&
             eventTurnId &&
-            Option.isSome(recoverySettings)
+            Option.isSome(recoverySettings) &&
+            !isHelixBuilder(thread.id)
           ) {
             const settings = yield* recoverySettings.value.getSettings;
             const current = (yield* orchestrationEngine.getReadModel()).threads.find(
@@ -3174,7 +3180,12 @@ const make = Effect.gen(function* () {
 
           // Freeze the source identity before observing any later refusal; replay can
           // recover an existing freeze, but cannot arm historical failures from usage UI data.
-          if (event.type === "turn.started" && eventTurnId && Option.isSome(recoverySettings)) {
+          if (
+            event.type === "turn.started" &&
+            eventTurnId &&
+            Option.isSome(recoverySettings) &&
+            !isHelixBuilder(thread.id)
+          ) {
             const settings = yield* recoverySettings.value.getSettings;
             const frozenSource = (yield* orchestrationEngine.getReadModel()).threads.find(
               (entry) => entry.id === thread.id,

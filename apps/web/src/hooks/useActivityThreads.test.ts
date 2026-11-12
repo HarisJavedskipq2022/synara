@@ -7,6 +7,7 @@ import type { SidebarThreadSummary } from "../types";
 const harness = vi.hoisted(() => ({
   state: {} as AppState,
   coordinatorIds: new Set<string>(),
+  helixBuilderIds: new Set<string>() as ReadonlySet<string>,
   summaries: new Map<ProjectId, Pick<ProjectAgentSummary, "memberThreadIds">>(),
 }));
 
@@ -31,6 +32,10 @@ vi.mock("../components/chat/project/useProjectAgentSummaries", () => ({
   useCoordinatorThreadIds: () => harness.coordinatorIds,
   useProjectAgentSummariesStore: (selector: (state: unknown) => unknown) =>
     selector({ summariesByProjectId: harness.summaries }),
+}));
+
+vi.mock("../helix/useHelix", () => ({
+  useHelixBuilderThreadIds: () => harness.helixBuilderIds,
 }));
 
 vi.mock("../betaFeatures", async (importOriginal) => ({
@@ -108,6 +113,18 @@ describe("useActivityThreads snooze visibility", () => {
     expect(result.activityNonGroupThreads.map((thread) => thread.id)).toEqual(["returned"]);
     expect(result.visibleNonGroupThreads.map((thread) => thread.id)).toEqual(["returned"]);
   });
+});
+
+it("keeps Helix Builder threads out of every list", () => {
+  const lead = makeThread("lead");
+  const builder = makeThread("builder");
+  setThreads([lead, builder]);
+  harness.helixBuilderIds = new Set(["builder"]);
+  const result = useActivityThreads({ hideAutomationRunThreads: true });
+  expect(result.displaySidebarThreads.map((thread) => thread.id)).toEqual(["lead"]);
+  expect(result.visibleNonGroupThreads.map((thread) => thread.id)).toEqual(["lead"]);
+  expect(result.activityNonGroupThreads.map((thread) => thread.id)).toEqual(["lead"]);
+  harness.helixBuilderIds = new Set();
 });
 
 it("updates Home candidates when a repository thread becomes a hub member", () => {

@@ -216,6 +216,42 @@ const HOT_PATH_MODULES: readonly HotPathModule[] = [
     // documented in place and costs memoization only for that one small hook.
     allowedBailoutReasons: ["Cannot access refs during render"],
   },
+  // Helix surfaces sit in the composer of every chat (they render nothing without a pair)
+  // and in the Lead's capsule popover.
+  {
+    relativePath: "chat/helix/HelixComposerSection.tsx",
+    requiredFunction: "HelixComposerCapsule",
+    allowedBailoutReasons: [],
+  },
+  // The composer's Helix control renders in every chat's picker row, new chats included.
+  {
+    relativePath: "chat/helix/ComposerHelixControl.tsx",
+    requiredFunction: "ComposerHelixControl",
+    allowedBailoutReasons: [],
+  },
+  {
+    relativePath: "chat/helix/HelixActivityBanner.tsx",
+    requiredFunction: "HelixActivityBanner",
+    allowedBailoutReasons: [],
+  },
+  {
+    relativePath: "chat/helix/HelixPairPanel.tsx",
+    requiredFunction: "HelixPairPanel",
+    allowedBailoutReasons: [],
+  },
+  {
+    relativePath: "chat/helix/HelixHandoffCard.tsx",
+    requiredFunction: "HelixHandoffCard",
+    allowedBailoutReasons: [],
+  },
+  // Renders inside a Lead's assistant rows; ordinary rows never reach it.
+  {
+    relativePath: "chat/helix/HelixTimelineHandoffs.tsx",
+    requiredFunction: "HelixTimelineHandoffs",
+    allowedBailoutReasons: [],
+  },
+  { relativePath: "../helix/useHelix.ts", allowedBailoutReasons: [] },
+  { relativePath: "../helix/helixMinuteClock.ts", allowedBailoutReasons: [] },
   { relativePath: "chat/TimelineWorkEntryRow.tsx", allowedBailoutReasons: [] },
   { relativePath: "chat/InlineVisualFrame.tsx", allowedBailoutReasons: [] },
   { relativePath: "chat/ChatTranscriptPane.tsx", allowedBailoutReasons: [] },

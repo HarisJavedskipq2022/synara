@@ -134,6 +134,7 @@ interface ChatTranscriptPaneProps {
   timelineEntries: ComponentProps<typeof MessagesTimeline>["timelineEntries"];
   messageChangeSignal?: ComponentProps<typeof MessagesTimeline>["messageChangeSignal"];
   hubWorkItemsByMessageId?: ComponentProps<typeof MessagesTimeline>["hubWorkItemsByMessageId"];
+  helixHandoffsByMessageId?: ComponentProps<typeof MessagesTimeline>["helixHandoffsByMessageId"];
   timestampFormat: TimestampFormat;
   /** Sound the message trail moves with (macOS desktop setting). */
   messageTrailAudioSource?: MessageTrailAudioSource;
@@ -239,6 +240,7 @@ export function ChatTranscriptPane({
   timelineEntries,
   messageChangeSignal,
   hubWorkItemsByMessageId,
+  helixHandoffsByMessageId,
   timestampFormat,
   messageTrailAudioSource,
   messageTrailMicrophoneId,
@@ -440,6 +442,7 @@ export function ChatTranscriptPane({
               {...(onContinueFailedTurn ? { onContinueFailedTurn } : {})}
               {...(onChangeRecoveryModel ? { onChangeRecoveryModel } : {})}
               hubWorkItemsByMessageId={hubWorkItemsByMessageId}
+              helixHandoffsByMessageId={helixHandoffsByMessageId}
               messageChangeSignal={messageChangeSignal ?? timelineEntries}
               turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
               turnTimingByTurnId={turnTimingByTurnId}

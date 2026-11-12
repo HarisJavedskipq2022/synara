@@ -158,7 +158,7 @@ layer("reconcileMigrationLineage", (it) => {
       const executed = yield* runMigrations();
       assert.deepStrictEqual(
         executed.map(([id]) => id),
-        [136, 137, 138, 139, 140, 141, 142],
+        [136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146],
       );
       assert.deepStrictEqual(yield* read(), before);
       assert.deepStrictEqual(
@@ -734,6 +734,10 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [140, "RemoteAccessControls"],
         [141, "ProjectionThreadsUsageLimitRecovery"],
         [142, "AuthAccessOrigin"],
+        [143, "HelixPairs"],
+        [144, "HelixRetiredBuilders"],
+        [145, "HelixStopRequests"],
+        [146, "HelixAppliedMessages"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -828,6 +832,10 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 140, name: "RemoteAccessControls" },
           { migration_id: 141, name: "ProjectionThreadsUsageLimitRecovery" },
           { migration_id: 142, name: "AuthAccessOrigin" },
+          { migration_id: 143, name: "HelixPairs" },
+          { migration_id: 144, name: "HelixRetiredBuilders" },
+          { migration_id: 145, name: "HelixStopRequests" },
+          { migration_id: 146, name: "HelixAppliedMessages" },
         ],
       );
       const groupConfigColumns = yield* sql<{ readonly name: string }>`
@@ -1002,6 +1010,10 @@ agentGatewayRetentionLegacyLayer(
           [140, "RemoteAccessControls"],
           [141, "ProjectionThreadsUsageLimitRecovery"],
           [142, "AuthAccessOrigin"],
+          [143, "HelixPairs"],
+          [144, "HelixRetiredBuilders"],
+          [145, "HelixStopRequests"],
+          [146, "HelixAppliedMessages"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -1139,6 +1151,10 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [140, "RemoteAccessControls"],
         [141, "ProjectionThreadsUsageLimitRecovery"],
         [142, "AuthAccessOrigin"],
+        [143, "HelixPairs"],
+        [144, "HelixRetiredBuilders"],
+        [145, "HelixStopRequests"],
+        [146, "HelixAppliedMessages"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1217,6 +1233,10 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [140, "RemoteAccessControls"],
           [141, "ProjectionThreadsUsageLimitRecovery"],
           [142, "AuthAccessOrigin"],
+          [143, "HelixPairs"],
+          [144, "HelixRetiredBuilders"],
+          [145, "HelixStopRequests"],
+          [146, "HelixAppliedMessages"],
         ],
       );
 
@@ -1349,6 +1369,10 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [140, "RemoteAccessControls"],
         [141, "ProjectionThreadsUsageLimitRecovery"],
         [142, "AuthAccessOrigin"],
+        [143, "HelixPairs"],
+        [144, "HelixRetiredBuilders"],
+        [145, "HelixStopRequests"],
+        [146, "HelixAppliedMessages"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1423,6 +1447,10 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [140, "RemoteAccessControls"],
           [141, "ProjectionThreadsUsageLimitRecovery"],
           [142, "AuthAccessOrigin"],
+          [143, "HelixPairs"],
+          [144, "HelixRetiredBuilders"],
+          [145, "HelixStopRequests"],
+          [146, "HelixAppliedMessages"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`

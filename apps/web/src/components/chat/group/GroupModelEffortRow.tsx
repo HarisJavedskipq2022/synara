@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import type {
   ModelSelection,
@@ -137,6 +137,36 @@ function UseDefaultLink(props: { readonly disabled: boolean; readonly onClick: (
   );
 }
 
+/** `settings` is the Settings-panel row; `inline` is a dense label + control line for popovers. */
+export type GroupRowLayout = "settings" | "inline";
+
+function GroupRowShell(props: {
+  readonly layout: GroupRowLayout;
+  readonly title: string;
+  readonly description: string;
+  readonly control?: ReactNode;
+  readonly status?: ReactNode;
+}) {
+  if (props.layout === "settings") {
+    return (
+      <SettingsRow
+        title={props.title}
+        description={props.description}
+        {...(props.control !== undefined ? { control: props.control } : {})}
+        {...(props.status !== undefined ? { status: props.status } : {})}
+      />
+    );
+  }
+  return (
+    <div className="flex min-h-8 min-w-0 items-center justify-between gap-3 px-2 py-0.5">
+      <span className="shrink-0 text-ui text-muted-foreground" title={props.description}>
+        {props.title}
+      </span>
+      <div className="flex min-w-0 justify-end text-ui">{props.control ?? props.status}</div>
+    </div>
+  );
+}
+
 export function GroupModelRow(props: {
   readonly title: string;
   readonly description: string;
@@ -144,7 +174,12 @@ export function GroupModelRow(props: {
   readonly defaultSelection: ModelSelection | null;
   readonly projectCwd: string;
   readonly onChange: (next: ModelSelection) => void;
+  /** Providers the row may not choose, each with the reason the picker shows. */
+  readonly providerRestrictions?: Partial<Record<ProviderKind, string>> | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly layout?: GroupRowLayout | undefined;
 }) {
+  const layout = props.layout ?? "settings";
   const { settings } = useAppSettings();
   const providerStatuses = useProviderStatusesForLocalConfig();
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -168,11 +203,19 @@ export function GroupModelRow(props: {
     modelSelectionsEqual(props.selection, props.defaultSelection);
 
   return (
-    <SettingsRow
+    <GroupRowShell
+      layout={layout}
       title={props.title}
       description={props.description}
       control={
-        <div className="flex w-full flex-col items-stretch gap-1 sm:w-auto sm:items-end">
+        <div
+          className={cn(
+            "flex flex-col gap-1",
+            layout === "settings"
+              ? "w-full items-stretch sm:w-auto sm:items-end"
+              : "min-w-0 items-end",
+          )}
+        >
           <ProviderModelPicker
             compact
             provider={props.selection.provider}
@@ -187,6 +230,10 @@ export function GroupModelRow(props: {
             discoveryErrorsByProvider={discoveryErrorsByProvider}
             hiddenProviders={settings.hiddenProviders}
             providerOrder={settings.providerOrder}
+            {...(props.providerRestrictions
+              ? { providerRestrictions: props.providerRestrictions }
+              : {})}
+            disabled={props.disabled === true}
             open={pickerOpen}
             onOpenChange={setPickerOpen}
             onProviderModelChange={(provider, model, instanceId) => {
@@ -217,9 +264,9 @@ export function GroupModelRow(props: {
               );
             }}
           />
-          {props.defaultSelection ? (
+          {props.defaultSelection && layout === "settings" ? (
             <UseDefaultLink
-              disabled={isDefault}
+              disabled={isDefault || props.disabled === true}
               onClick={() => {
                 const fallback = props.defaultSelection;
                 if (fallback) props.onChange(fallback);
@@ -238,8 +285,11 @@ export function GroupEffortRow(props: {
   readonly selection: ModelSelection;
   readonly projectCwd: string;
   readonly onChange: (next: ModelSelection) => void;
+  readonly disabled?: boolean | undefined;
+  readonly layout?: GroupRowLayout | undefined;
 }) {
   const { t } = useTranslation();
+  const layout = props.layout ?? "settings";
 
   const { settings } = useAppSettings();
   const selectedProviderInstanceId = useSelectionProviderInstanceId(settings, props.selection);
@@ -273,7 +323,8 @@ export function GroupEffortRow(props: {
 
   if (effortOptions.length === 0 || optionId === null) {
     return (
-      <SettingsRow
+      <GroupRowShell
+        layout={layout}
         title={props.title}
         description={props.description}
         status={
@@ -326,13 +377,26 @@ export function GroupEffortRow(props: {
     effortOptions.find((option) => option.value === currentEffort)?.label ?? currentEffort;
 
   return (
-    <SettingsRow
+    <GroupRowShell
+      layout={layout}
       title={props.title}
       description={props.description}
       control={
-        <div className="flex w-full flex-col items-stretch gap-1 sm:w-auto sm:items-end">
+        <div
+          className={cn(
+            "flex flex-col gap-1",
+            layout === "settings" ? "w-full items-stretch sm:w-auto sm:items-end" : "items-end",
+          )}
+        >
           <SettingsSelectControl
+            {...(layout === "inline"
+              ? {
+                  triggerClassName:
+                    "h-7 w-auto min-w-0 border-transparent bg-transparent px-1.5 text-ui-sm text-[var(--color-text-foreground-secondary)] shadow-none hover:bg-[var(--color-background-elevated-secondary)] hover:text-[var(--color-text-foreground)] dark:bg-transparent",
+                }
+              : {})}
             value={currentEffort}
+            disabled={props.disabled === true}
             onValueChange={handleEffortChange}
             ariaLabel={props.title}
             valueContent={currentLabel}
@@ -343,7 +407,12 @@ export function GroupEffortRow(props: {
               </SelectItem>
             ))}
           </SettingsSelectControl>
-          <UseDefaultLink disabled={!hasOverride} onClick={handleUseDefault} />
+          {layout === "settings" ? (
+            <UseDefaultLink
+              disabled={!hasOverride || props.disabled === true}
+              onClick={handleUseDefault}
+            />
+          ) : null}
         </div>
       }
     />

@@ -5,6 +5,7 @@
 
 import {
   type EditorId,
+  type HelixHandoff,
   type HubWorkItem,
   type MessageId,
   type ProviderMentionReference,
@@ -49,6 +50,7 @@ import {
   type WorktreeSetupStep,
 } from "../../types";
 import { HubWorkItemCards } from "./group/HubWorkItemCard";
+import { HelixTimelineHandoffs } from "./helix/HelixTimelineHandoffs";
 import { AsyncUserInputCard } from "./AsyncUserInputCard";
 import ChatMarkdown from "../ChatMarkdown";
 import {
@@ -501,6 +503,8 @@ interface MessagesTimelineProps {
   /** Stable source messages, before plans/tools reshape the presentation rows. */
   messageChangeSignal?: unknown;
   hubWorkItemsByMessageId?: ReadonlyMap<MessageId, readonly HubWorkItem[]> | undefined;
+  /** Helix handoffs under the Lead turn that created them; undefined without a pair. */
+  helixHandoffsByMessageId?: ReadonlyMap<MessageId, readonly HelixHandoff[]> | undefined;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   /** Real start/end/outcome per turn for settled "Worked for" headers. */
   turnTimingByTurnId?: ReadonlyMap<TurnId, TurnTiming> | undefined;
@@ -621,6 +625,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timelineEntries,
   messageChangeSignal: messageChangeSignalProp,
   hubWorkItemsByMessageId,
+  helixHandoffsByMessageId,
   turnDiffSummaryByAssistantMessageId,
   turnTimingByTurnId,
   conversationOnly: conversationOnlyProp,
@@ -857,7 +862,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       !forkSource &&
       !crossTaskOrigin &&
       !subagentThread &&
-      !hubWorkItemsByMessageId?.has(row.message.id),
+      !hubWorkItemsByMessageId?.has(row.message.id) &&
+      !helixHandoffsByMessageId?.has(row.message.id),
     [
       expandedUserMessagesById,
       editingUserMessageId,
@@ -866,6 +872,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       crossTaskOrigin,
       subagentThread,
       hubWorkItemsByMessageId,
+      helixHandoffsByMessageId,
     ],
   );
   const rowHeightHints = useTimelineRowHeightHints(
@@ -2343,6 +2350,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         row.message.role === "assistant" &&
         (() => {
           const messageText = resolveAssistantMessageDisplayText(row);
+          const messageHandoffs = helixHandoffsByMessageId?.get(row.message.id);
           const buildWorkDisplay = (workEntries: WorkLogEntry[], workGroupId: string | null) => {
             const displayEntries = workEntries.filter((entry) => !entry.synaraThreadCreation);
             const toolEntries = displayEntries.filter((entry) => entry.tone === "tool");
@@ -3038,6 +3046,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   </div>
                 )}
               </div>
+              {messageHandoffs && threadId ? (
+                <HelixTimelineHandoffs
+                  handoffs={messageHandoffs}
+                  leadThreadId={ThreadId.makeUnsafe(threadId)}
+                />
+              ) : null}
             </>
           );
         })()}
@@ -3144,6 +3158,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({
       renderRowContent,
       hubWorkItemsByMessageId,
+      helixHandoffsByMessageId,
       crossTaskOrigin,
       subagentThread,
       subagentDeliveredMessageIds,
@@ -3166,6 +3181,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [
       renderRowContent,
       hubWorkItemsByMessageId,
+      helixHandoffsByMessageId,
       crossTaskOrigin,
       subagentThread,
       subagentDeliveredMessageIds,

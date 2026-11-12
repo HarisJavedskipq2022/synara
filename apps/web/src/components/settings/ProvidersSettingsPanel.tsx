@@ -136,6 +136,7 @@ import {
 } from "./SettingControls";
 import { SettingsListRow, SettingsRow, SettingsSection } from "./SettingsPanelPrimitives";
 import { UsageLimitRecoverySetting } from "./UsageLimitRecoverySetting";
+import { HelixSetting } from "./HelixSetting";
 import { t, useTranslation } from "~/i18n";
 
 type ProviderInstallTextKey =
@@ -2452,6 +2453,7 @@ export function ProvidersSettingsPanel({
 
       <SettingsSection title="settings:performance">
         <UsageLimitRecoverySetting />
+        <HelixSetting />
         <SettingsRow
           id="setting-keep-synara-responsive"
           title="settings:keepSynaraResponsive"

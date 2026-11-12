@@ -99,8 +99,9 @@ export function useChatWorkspaceSelection({
   const homeDir = useWorkspacePathsStore((state) => state.homeDir);
   const chatWorkspaceRoot = useWorkspacePathsStore((state) => state.chatWorkspaceRoot);
   const onEnvModeChange = useCallback(
-    (mode: DraftThreadEnvMode) => {
-      if (activeProject) {
+    (mode: DraftThreadEnvMode, options?: { readonly rememberForProject?: boolean }) => {
+      // A choice made for one chat (Helix moving it to a worktree) leaves the project default.
+      if (activeProject && options?.rememberForProject !== false) {
         useProjectEnvironmentStore.getState().setProjectEnvMode(activeProject.id, mode);
       }
       const nextBranch =

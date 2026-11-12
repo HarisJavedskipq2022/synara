@@ -57,6 +57,7 @@ function serverSettings(overrides: Partial<ServerSettings["providers"]> = {}): S
   return {
     autoResumeAfterUsageLimits: false,
     usageLimitRecoveryEpoch: 0,
+    enableHelix: false,
     enableAssistantStreaming: false,
     enableProviderUpdateChecks: true,
     keepAwakeMode: "off",

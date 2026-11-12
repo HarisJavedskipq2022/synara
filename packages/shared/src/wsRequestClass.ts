@@ -5,7 +5,12 @@
 //      connection and rejects the rest; the web transport queues against the same
 //      budgets so it never sends a request the server would reject.
 
-import { ORCHESTRATION_WS_METHODS, WS_METHODS, WsRpcError } from "@synara/contracts";
+import {
+  HELIX_WS_METHODS,
+  ORCHESTRATION_WS_METHODS,
+  WS_METHODS,
+  WsRpcError,
+} from "@synara/contracts";
 
 export type WsRequestClass = "control" | "standard" | "expensive-read";
 
@@ -29,6 +34,10 @@ const CONTROL_METHODS = new Set<string>([
   WS_METHODS.automationCancelRun,
   WS_METHODS.automationMarkRunRead,
   WS_METHODS.automationArchiveRun,
+  // Helix pair controls must not queue behind ordinary requests: Stop always wins.
+  HELIX_WS_METHODS.stop,
+  HELIX_WS_METHODS.pause,
+  HELIX_WS_METHODS.resume,
 ]);
 
 const EXPENSIVE_READ_METHODS = new Set<string>([

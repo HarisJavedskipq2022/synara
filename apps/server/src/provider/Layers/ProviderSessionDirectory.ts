@@ -45,6 +45,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const CLEARABLE_RUNTIME_PAYLOAD_KEYS = new Set([
   "continuationIdentity",
   "continuationResetRequested",
+  "helixRole",
   "providerOptions",
   "providerOptionsCredentialsFingerprint",
 ]);

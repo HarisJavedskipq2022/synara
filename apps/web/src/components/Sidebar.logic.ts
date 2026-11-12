@@ -18,6 +18,7 @@ import { isWorkspaceRootWithin, workspaceRootsEqual } from "@synara/shared/threa
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "../appSettings";
 import { resolveRestorableThreadRoute, type LastThreadRoute } from "../chatRouteRestore";
 import type { ChatMessage, Project, SidebarThreadSummary, Thread } from "../types";
+import type { HelixChatStatus, HelixRowStatus } from "../helix/helixPresentation";
 import { cn } from "../lib/utils";
 import type { GitHubReviewRequestBadgeCount } from "../lib/githubInboxQueryOptions";
 import {
@@ -381,7 +382,15 @@ export interface ThreadStatusPill {
     | "Awaiting Input"
     | "Plan Ready"
     | "In Background"
-    | "Reminder";
+    | "Reminder"
+    // A Helix Lead's row shows its pair's status.
+    | "Planning"
+    | "Building"
+    | "Reviewing"
+    | "Needs Attention"
+    | "Uncertain"
+    | "Paused"
+    | "Stopped";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -431,17 +440,31 @@ export const THREAD_STATUS_LABEL_KEYS: Record<ThreadStatusPill["label"], string>
   Connecting: "chat:composer_connecting",
   "Preparing worktree": "workspace:composer_preparingWorktree",
   Completed: "workspace:triageOutcome_completed",
+  Planning: "chat:helix_status_planning",
+  Building: "chat:helix_status_building",
+  Reviewing: "chat:helix_status_reviewing",
+  "Needs Attention": "chat:helix_status_needsAttention",
+  Uncertain: "chat:helix_status_uncertain",
+  Paused: "chat:helix_status_paused",
+  Stopped: "chat:helix_status_stopped",
 };
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
+  "Needs Attention": 4,
+  Uncertain: 4,
   Working: 3,
+  Planning: 3,
+  Building: 3,
+  Reviewing: 3,
   Connecting: 3,
   "Preparing worktree": 3,
   "Plan Ready": 2,
   "In Background": 2,
   Reminder: 2,
+  Paused: 2,
+  Stopped: 2,
   Completed: 1,
 };
 
@@ -635,19 +658,64 @@ export function isThreadActivelyWorking(thread: {
   );
 }
 
+const HELIX_LIVE_PILL_CLASSES = {
+  colorClass: "text-sky-600 dark:text-sky-300/80",
+  dotClass: "bg-sky-500 dark:bg-sky-300/80",
+} as const;
+const HELIX_ATTENTION_PILL_CLASSES = {
+  colorClass: "text-amber-600 dark:text-amber-300/90",
+  dotClass: "bg-amber-500 dark:bg-amber-300/90",
+} as const;
+const HELIX_HELD_PILL_CLASSES = {
+  colorClass: "text-muted-foreground",
+  dotClass: "bg-muted-foreground/60",
+} as const;
+
+/** The pill for a Helix Lead's pair status; null when the pair has nothing to show. */
+export function resolveHelixThreadStatusPill(
+  status: HelixChatStatus,
+  leadWorking: boolean,
+): ThreadStatusPill | null {
+  switch (status) {
+    case "needs_attention":
+      return { label: "Needs Attention", ...HELIX_ATTENTION_PILL_CLASSES, pulse: false };
+    case "uncertain":
+      return { label: "Uncertain", ...HELIX_ATTENTION_PILL_CLASSES, pulse: false };
+    case "stopped":
+      return { label: "Stopped", ...HELIX_HELD_PILL_CLASSES, pulse: false };
+    case "paused":
+      return { label: "Paused", ...HELIX_HELD_PILL_CLASSES, pulse: false };
+    case "building":
+      return { label: "Building", ...HELIX_LIVE_PILL_CLASSES, pulse: true };
+    case "reviewing":
+      return { label: "Reviewing", ...HELIX_LIVE_PILL_CLASSES, pulse: leadWorking };
+    case "planning":
+      return { label: "Planning", ...HELIX_LIVE_PILL_CLASSES, pulse: true };
+    case "idle":
+      return leadWorking ? { label: "Planning", ...HELIX_LIVE_PILL_CLASSES, pulse: true } : null;
+  }
+}
+
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
   isPreparingWorktree?: boolean;
+  /** The Helix pair this thread leads; its Builder's requests surface on this row. */
+  helix?: HelixRowStatus | null | undefined;
 }): ThreadStatusPill | null {
   const { thread } = input;
+  const helix = input.helix ?? null;
   // A dead session can't receive approval/input answers anymore — drop the
   // actionable pills instead of advertising a request nobody can fulfill.
   // Mirrored by the kanban board's deriveKanbanColumn.
   const canAnswerPendingRequests = canSessionAnswerPendingRequests(thread.session);
-  const hasPendingApprovals = input.hasPendingApprovals && canAnswerPendingRequests;
-  const hasPendingUserInput = input.hasPendingUserInput && canAnswerPendingRequests;
+  const hasPendingApprovals =
+    (input.hasPendingApprovals && canAnswerPendingRequests) ||
+    helix?.builderHasPendingApprovals === true;
+  const hasPendingUserInput =
+    (input.hasPendingUserInput && canAnswerPendingRequests) ||
+    helix?.builderHasPendingUserInput === true;
 
   if (hasPendingApprovals) {
     const dismissalKey = createThreadStatusDismissalKey("Pending Approval", thread);
@@ -677,6 +745,11 @@ export function resolveThreadStatusPill(input: {
       dismissible: true,
       dismissalKey,
     };
+  }
+
+  if (helix !== null) {
+    const helixPill = resolveHelixThreadStatusPill(helix.status, isThreadActivelyWorking(thread));
+    if (helixPill !== null) return helixPill;
   }
 
   if (isThreadActivelyWorking(thread)) {

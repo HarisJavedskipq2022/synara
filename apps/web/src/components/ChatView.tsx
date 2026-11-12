@@ -343,6 +343,13 @@ import { ProviderInstancePicker } from "./chat/ProviderInstancePicker";
 import { ComposerPendingApprovalPanel } from "./chat/ComposerPendingApprovalPanel";
 import { HubPendingApprovals } from "./chat/group/HubPendingApprovals";
 import { ComposerRunningAgentsCapsule } from "./chat/ComposerRunningAgentsCapsule";
+import { ComposerHelixControl } from "./chat/helix/ComposerHelixControl";
+import {
+  HelixComposerCapsule,
+  HelixComposerNotices,
+  useHelixBuilderRole,
+} from "./chat/helix/HelixComposerSection";
+import { useHelixTimelineHandoffs } from "./chat/helix/HelixTimelineHandoffs";
 import {
   ComposerClaudeCacheReviewPanel,
   isClaudeCacheReviewPanelVisible,
@@ -1923,11 +1930,18 @@ export default function ChatView({
   );
   const isComposerApprovalState = activePendingApproval !== null;
   const isSidechatExpired = Boolean(activeThread?.sidechatExpiredAt);
+  // A Helix Builder takes its work from the Lead (it can still answer its own questions)
+  // and shares the Lead's workspace, so it shows no workspace, model or mode controls.
+  const helixBuilderRole = useHelixBuilderRole(isServerThread ? threadId : null);
+  const isHelixBuilderThread = helixBuilderRole !== null;
+  const isHelixBuilderComposerLocked =
+    helixBuilderRole === "locked" && pendingUserInputs.length === 0;
   const isComposerEditorDisabled =
     isConnecting ||
     isComposerApprovalState ||
     isSidechatExpired ||
-    isNativeSubagentMessagingUnavailable;
+    isNativeSubagentMessagingUnavailable ||
+    isHelixBuilderComposerLocked;
   const canCollapsePastedTextToDraft = shouldEnableComposerPastedTextCollapse({
     isComposerApprovalState,
     hasPendingUserInput: pendingUserInputs.length > 0,
@@ -1996,6 +2010,10 @@ export default function ChatView({
   const activeGroupSummary = isCoordinatorConversation ? summaryFor(activeThread?.projectId) : null;
   const hubWorkItems = useHubWorkItems(
     isCoordinatorConversation ? (activeThread?.projectId ?? null) : null,
+  );
+  const helixHandoffsByMessageId = useHelixTimelineHandoffs(
+    isServerThread ? threadId : null,
+    activeThread?.messages,
   );
   const hubWorkItemsByMessageId = useMemo(
     () => hubWorkItemsBySourceMessage(hubWorkItems, activeThread?.id),
@@ -4934,7 +4952,7 @@ export default function ChatView({
   }, [claudeSwitchKey]);
   const onSend = useCallback(
     async (...args: Parameters<typeof submitComposerTurn>) => {
-      if (isNativeSubagentMessagingUnavailable) {
+      if (isNativeSubagentMessagingUnavailable || isHelixBuilderComposerLocked) {
         args[0]?.preventDefault();
         return false;
       }
@@ -4947,7 +4965,12 @@ export default function ChatView({
       }
       return accepted;
     },
-    [claudeSwitchKey, isNativeSubagentMessagingUnavailable, submitComposerTurn],
+    [
+      claudeSwitchKey,
+      isHelixBuilderComposerLocked,
+      isNativeSubagentMessagingUnavailable,
+      submitComposerTurn,
+    ],
   );
   const showClaudeModelSwitchNote =
     claudeSwitchKey !== null &&
@@ -5115,7 +5138,7 @@ export default function ChatView({
       shortcutLabel={modelPickerShortcutLabel}
     />
   );
-  const composerPickerControls = (
+  const composerModelPickerControls = isHelixBuilderThread ? null : (
     <>
       {showProviderInstancePicker ? (
         showComposerModelBootstrapSkeleton ? (
@@ -5772,6 +5795,34 @@ export default function ChatView({
   const handleComposerPaste = useStableCallback(onComposerPaste);
   const handleCollapsePastedText = useStableCallback(addPastedTextToDraft);
   const handleEnvModeChange = useStableCallback(onEnvModeChange);
+  // Turning Helix on in a chat that has not started on a local checkout moves it to a new
+  // worktree, for this chat only; the workspace control can move it back.
+  const helixPrefersWorktree =
+    !envLocked &&
+    !hasNativeUserMessages &&
+    isGitRepo &&
+    !isContainerLandingProject &&
+    envMode === "local" &&
+    !activeWorktreePath;
+  const handleHelixPreferWorktree = useStableCallback(() =>
+    onEnvModeChange("worktree", { rememberForProject: false }),
+  );
+  const composerPickerControls = isHelixBuilderThread ? null : (
+    <>
+      {activeThreadIsSidechat ? null : (
+        <ComposerHelixControl
+          threadId={threadId}
+          leadSelection={selectedModelSelection}
+          projectCwd={activeProject?.cwd ?? ""}
+          compact={isComposerFooterCompact}
+          hideLabel={!composerFooterControlsPlan.showModelLabel}
+          onPreferWorktree={helixPrefersWorktree ? handleHelixPreferWorktree : undefined}
+          onOpenThread={onNavigateToThread}
+        />
+      )}
+      {composerModelPickerControls}
+    </>
+  );
   const handleHandoffToWorktree = useStableCallback(onHandoffToWorktree);
   const handleHandoffToLocal = useStableCallback(onHandoffToLocal);
   const handleConfirmWorktreeHandoff = useStableCallback(confirmWorktreeHandoff);
@@ -5910,7 +5961,7 @@ export default function ChatView({
   // Started threads keep the composer to + / text / mic / send: permission, model/effort and
   // the context ring sit in the row under it, beside the branch controls.
   const composerStatusBelow = !isCenteredEmptyLanding;
-  const composerExtrasTrigger = (
+  const composerExtrasTrigger = isHelixBuilderThread ? null : (
     <ComposerExtrasTrigger
       open={isComposerExtrasPanelOpen}
       panelId={COMPOSER_EXTRAS_PANEL_ID}
@@ -5957,7 +6008,7 @@ export default function ChatView({
   const renderComposerLeadingControls = (options: { iconOnly: boolean }) => (
     <>
       {composerExtrasTrigger}
-      {!isVoiceRecording && !isVoiceTranscribing ? (
+      {!isVoiceRecording && !isVoiceTranscribing && !isHelixBuilderThread ? (
         <RuntimeUsageControls
           {...runtimeUsageControlsProps}
           className="shrink-0"
@@ -6019,6 +6070,7 @@ export default function ChatView({
     ) : null;
   // Only primary chats offer a new-chat workspace tray.
   const showEmptyLandingControls =
+    !isHelixBuilderThread &&
     isCenteredEmptyLanding &&
     (isEmptyChatLanding ||
       showEmptyLandingProjectPicker ||
@@ -6397,6 +6449,13 @@ export default function ChatView({
                   onClear={clearThreadGoal}
                 />
               ) : null}
+              {isServerThread ? (
+                <HelixComposerCapsule
+                  threadId={threadId}
+                  interactionMode={interactionMode}
+                  onOpenThread={onNavigateToThread}
+                />
+              ) : null}
               {runningAgents.count > 0 ? (
                 <ComposerRunningAgentsCapsule
                   count={runningAgents.count}
@@ -6456,6 +6515,9 @@ export default function ChatView({
                   card floating just above the composer (padding gives the measured gap),
                   instead of a banner fused into the composer surface. An approval takes
                   precedence and suppresses the question card while one is active. */}
+            {isServerThread ? (
+              <HelixComposerNotices threadId={threadId} onOpenThread={onNavigateToThread} />
+            ) : null}
             {isCoordinatorConversation && activeThread ? (
               <HubPendingApprovals
                 threadIds={hubApprovalThreadIds}
@@ -6711,23 +6773,25 @@ export default function ChatView({
                     ? { onCollapsePastedText: handleCollapsePastedText }
                     : {})}
                   placeholder={
-                    isNativeSubagentMessagingUnavailable
-                      ? t("chat:subagentReadOnly")
-                      : isComposerApprovalState
-                        ? t("chat:placeholder_resolveApproval")
-                        : activePendingProgress
-                          ? activePendingProgress.activeQuestion?.options.length === 0
-                            ? t("chat:placeholder_typeAnswer")
-                            : t("chat:placeholder_typeOwnAnswer")
-                          : showPlanFollowUpPrompt && activeProposedPlan
-                            ? t("chat:placeholder_refinePlan")
-                            : activeThread?.parentThreadId
-                              ? t("chat:messageThisSubagent")
-                              : hasLiveTurn
-                                ? t("chat:placeholder_followUp")
-                                : standaloneSidechatContext
-                                  ? t("chat:askAboutItem", { item: standaloneSidechatItemNoun })
-                                  : t("chat:doAnythingInSynara")
+                    isHelixBuilderComposerLocked
+                      ? t("chat:helix_builderLockedPlaceholder")
+                      : isNativeSubagentMessagingUnavailable
+                        ? t("chat:subagentReadOnly")
+                        : isComposerApprovalState
+                          ? t("chat:placeholder_resolveApproval")
+                          : activePendingProgress
+                            ? activePendingProgress.activeQuestion?.options.length === 0
+                              ? t("chat:placeholder_typeAnswer")
+                              : t("chat:placeholder_typeOwnAnswer")
+                            : showPlanFollowUpPrompt && activeProposedPlan
+                              ? t("chat:placeholder_refinePlan")
+                              : activeThread?.parentThreadId
+                                ? t("chat:messageThisSubagent")
+                                : hasLiveTurn
+                                  ? t("chat:placeholder_followUp")
+                                  : standaloneSidechatContext
+                                    ? t("chat:askAboutItem", { item: standaloneSidechatItemNoun })
+                                    : t("chat:doAnythingInSynara")
                   }
                   disabled={isComposerEditorDisabled}
                   singleLine={composerSingleRow}
@@ -6788,7 +6852,10 @@ export default function ChatView({
                       activeThread?.usageLimitRecovery != null && phase !== "running",
                     busy: isSendBusy,
                     connecting: isConnecting,
-                    expired: isSidechatExpired || isNativeSubagentMessagingUnavailable,
+                    expired:
+                      isSidechatExpired ||
+                      isNativeSubagentMessagingUnavailable ||
+                      isHelixBuilderComposerLocked,
                     hasPendingCacheReview: activeThread?.claudeCacheReview != null,
                     preparingImages: isPreparingComposerImages,
                     preparingWorktree: isPreparingWorktree,
@@ -7153,6 +7220,7 @@ export default function ChatView({
                     turnTimingByTurnId={turnTimingByTurnId}
                     conversationOnly={isCoordinatorConversation}
                     hubWorkItemsByMessageId={hubWorkItemsByMessageId}
+                    helixHandoffsByMessageId={helixHandoffsByMessageId}
                     threadError={activeThread?.error ?? null}
                     recoverableTurnId={
                       activeLatestTurnState === "error" ? activeLatestTurnId : null
@@ -7297,8 +7365,13 @@ export default function ChatView({
                         data-chat-composer-status-row=""
                         className="@container flex min-h-9 w-full min-w-0 flex-wrap items-center gap-1 pb-1.5 pt-1"
                       >
-                        <RuntimeUsageControls {...runtimeUsageControlsProps} className="shrink-0" />
-                        {showTrailingBranchToolbar ? (
+                        {isHelixBuilderThread ? null : (
+                          <RuntimeUsageControls
+                            {...runtimeUsageControlsProps}
+                            className="shrink-0"
+                          />
+                        )}
+                        {showTrailingBranchToolbar && !isHelixBuilderThread ? (
                           <BranchToolbar
                             {...branchToolbarProps}
                             className="min-w-0 flex-[1_0_9rem] px-1 py-0"

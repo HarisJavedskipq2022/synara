@@ -8,7 +8,7 @@ import { t } from "~/i18n";
 // Exports: foldSubagentRunWorkEntries, deriveSubagentRunCard, scanSubagentRunCards,
 // summarizeRunningAgents, and the card model types
 
-import { ThreadId, type TurnId } from "@synara/contracts";
+import { ThreadId, type OrchestrationThreadActivity, type TurnId } from "@synara/contracts";
 import { pluralize } from "@synara/shared/text";
 
 import {
@@ -371,23 +371,36 @@ function threadForInvocation(
   return view;
 }
 
-const childActionByActivities = new WeakMap<
-  SubagentRunThread["activities"],
-  SubagentRunAction | null
+export interface LatestToolStep {
+  readonly action: SubagentRunAction;
+  /** When the step's work-log entry started. */
+  readonly startedAt: string;
+  /** The tool call has not completed, failed or been cancelled yet. */
+  readonly running: boolean;
+}
+
+const toolStepByActivities = new WeakMap<
+  ReadonlyArray<OrchestrationThreadActivity>,
+  LatestToolStep | null
 >();
 
-// The child's latest tool step, cached per activity array: rows re-derive every
-// second while a subagent runs, but the step only changes with new activity.
-function latestChildAction(thread: SubagentRunThread): SubagentRunAction | null {
-  const cached = childActionByActivities.get(thread.activities);
+/**
+ * A thread's latest tool step (the command it runs, else the tool's title), cached per
+ * activity array: rows re-derive every second while an agent runs, but the step only
+ * changes with new activity. Shared by subagent rows and the Helix Builder line.
+ */
+export function latestToolStep(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): LatestToolStep | null {
+  const cached = toolStepByActivities.get(activities);
   if (cached !== undefined) {
     return cached;
   }
-  let action: SubagentRunAction | null = null;
-  if (thread.activities.length > 0) {
+  let step: LatestToolStep | null = null;
+  if (activities.length > 0) {
     // The activity array already belongs to this invocation, including tools
     // without a provider turn ID and earlier child turns within the same run.
-    const entries = deriveWorkLogEntries(thread.activities, undefined);
+    const entries = deriveWorkLogEntries(activities, undefined);
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index]!;
       if (entry.tone !== "tool" || entry.subagentRun || (entry.subagents?.length ?? 0) > 0) {
@@ -395,14 +408,23 @@ function latestChildAction(thread: SubagentRunThread): SubagentRunAction | null 
       }
       const command = entry.command?.trim() || null;
       const label = (entry.toolTitle ?? entry.label).trim() || null;
-      action = command ? { command, label: null } : label ? { command: null, label } : null;
+      const action = command ? { command, label: null } : label ? { command: null, label } : null;
       if (action) {
+        step = {
+          action,
+          startedAt: entry.createdAt,
+          running: entry.toolStatus === undefined || entry.toolStatus === "running",
+        };
         break;
       }
     }
   }
-  childActionByActivities.set(thread.activities, action);
-  return action;
+  toolStepByActivities.set(activities, step);
+  return step;
+}
+
+function latestChildAction(thread: SubagentRunThread): SubagentRunAction | null {
+  return latestToolStep(thread.activities)?.action ?? null;
 }
 
 // Progress steps read "Running <what>"; the row already says the verb.

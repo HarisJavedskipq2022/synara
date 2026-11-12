@@ -252,3 +252,62 @@ it("adds Computer guidance only for an explicitly enabled scoped session across 
     );
   }
 });
+
+describe("Synara harness policy for Helix participants", () => {
+  const ordinary = renderSynaraHarnessPolicy({ gatewayControlAvailable: true });
+
+  it("leaves every non-Helix rendering unchanged", () => {
+    for (const capabilities of [
+      { gatewayControlAvailable: true },
+      { gatewayControlAvailable: false },
+      { gatewayControlAvailable: true, enableComputerControl: true },
+      { gatewayControlAvailable: true, inlineVisuals: true },
+      { gatewayControlAvailable: true, automationAuthoring: "tool-descriptions" as const },
+    ]) {
+      assert.strictEqual(
+        renderSynaraHarnessPolicy({ ...capabilities, helixRole: undefined }),
+        renderSynaraHarnessPolicy(capabilities),
+      );
+      assert.notInclude(renderSynaraHarnessPolicy(capabilities), "Helix");
+    }
+  });
+
+  it("tells a Builder only what its helix_report-only credential can do", () => {
+    const builder = renderSynaraHarnessPolicy({
+      gatewayControlAvailable: true,
+      enableComputerControl: true,
+      inlineVisuals: true,
+      helixRole: "builder",
+    });
+    assert.include(builder, SYNARA_HARNESS_POLICY_MARKER);
+    assert.include(builder, "Synara is the host and harness");
+    assert.include(builder, "helix_report");
+    for (const forbidden of [
+      "synara_",
+      "browser_",
+      "device_",
+      "Await native subagents",
+      "Hub roles",
+      "## Synara computer use",
+    ]) {
+      assert.notInclude(builder, forbidden, forbidden);
+    }
+    assert.notInclude(builder, AUTOMATION_AUTHORING_GUIDANCE);
+  });
+
+  it("keeps the ordinary policy for a Lead and adds where implementation goes", () => {
+    const lead = renderSynaraHarnessPolicy({ gatewayControlAvailable: true, helixRole: "lead" });
+    assert.include(lead, "helix_delegate");
+    for (const line of ordinary.split("\n")) assert.include(lead, line);
+    assert.strictEqual(lead.split("\n").length, ordinary.split("\n").length + 1);
+  });
+
+  it("does not claim Synara control for a participant without a gateway connection", () => {
+    for (const helixRole of ["lead", "builder"] as const) {
+      assert.strictEqual(
+        renderSynaraHarnessPolicy({ gatewayControlAvailable: false, helixRole }),
+        renderSynaraHarnessPolicy({ gatewayControlAvailable: false }),
+      );
+    }
+  });
+});

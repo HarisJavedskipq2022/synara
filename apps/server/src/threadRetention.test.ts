@@ -342,4 +342,38 @@ describe("thread retention", () => {
       },
     });
   });
+
+  it("never archives a Helix Builder on its own; it follows its Lead", async () => {
+    const stale = new Date(Date.now() - THREAD_RETENTION_UNUSED_MS - 1).toISOString();
+    const builderId = ThreadId.makeUnsafe("helix-builder");
+    const ordinaryId = ThreadId.makeUnsafe("ordinary-stale");
+    const dispatchedCommands: OrchestrationCommand[] = [];
+    const shellSnapshot = makeReadModel([
+      makeReadModelThread({ id: builderId, latestUserMessageAt: stale }),
+      makeReadModelThread({ id: ordinaryId, latestUserMessageAt: stale }),
+    ]) as unknown as OrchestrationShellSnapshot;
+    const engine = {
+      dispatch: (command: OrchestrationCommand) =>
+        Effect.sync(() => {
+          dispatchedCommands.push(command);
+          return { sequence: 1 };
+        }),
+    } as unknown as OrchestrationEngineShape;
+    await Effect.runPromise(
+      runThreadRetentionSweep(
+        engine,
+        {
+          getShellSnapshot: () => Effect.succeed(shellSnapshot),
+        } as unknown as ProjectionSnapshotQueryShape,
+        {
+          list: () => Effect.succeed({ definitions: [], runs: [], memories: [] }),
+        } as unknown as AutomationRepositoryShape,
+        Effect.void,
+        () => new Set([builderId]),
+      ).pipe(Effect.provide(ServerLifecycleEventsLive)),
+    );
+    expect(dispatchedCommands.map((command) => "threadId" in command && command.threadId)).toEqual([
+      ordinaryId,
+    ]);
+  });
 });

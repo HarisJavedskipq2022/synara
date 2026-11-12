@@ -137,6 +137,12 @@ import { TodoService } from "../../todo/Services/TodoService.ts";
 import { isServerBetaFeatureEnabled } from "../../betaFeatureGate.ts";
 import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import {
+  HelixGatewayPort,
+  notImplementedHelixGatewayPort,
+} from "../../helix/Services/HelixGatewayPort.ts";
+import { HelixCoordinatorService } from "../../helix/Services/HelixCoordinator.ts";
+import { makeAgentGatewayHelixTools } from "../helixTools.ts";
 
 const providerInstanceAvailability = (
   instance: ReturnType<typeof deriveProviderInstances>[number],
@@ -217,6 +223,12 @@ export const makeAgentGateway = Effect.gen(function* () {
   // offered eleven tools that can only report an unsupported platform.
   const deviceService = Option.getOrUndefined(yield* Effect.serviceOption(DeviceService));
   const computerService = Option.getOrUndefined(yield* Effect.serviceOption(ComputerService));
+  // The coordinator provides the port; until then every helix_* call reports not implemented.
+  const helixHooks = Option.getOrUndefined(yield* Effect.serviceOption(HelixCoordinatorService));
+  const helixGatewayPort = Option.getOrElse(
+    yield* Effect.serviceOption(HelixGatewayPort),
+    () => notImplementedHelixGatewayPort,
+  );
   const loadProviderAvailabilities = Effect.gen(function* () {
     const [settings, statuses] = yield* Effect.all([
       serverSettings.getSettings,
@@ -337,6 +349,14 @@ export const makeAgentGateway = Effect.gen(function* () {
     },
   ) =>
     Effect.gen(function* () {
+      // A Helix Builder is driven only through the helix_* tools, even by its Lead.
+      if (helixHooks?.roleOf(target.id)?.role === "builder") {
+        return yield* Effect.fail(
+          new ToolInputError(
+            `Thread "${target.id}" is a Helix Builder. Delegate to it with helix_delegate and review with helix_review; other thread tools cannot drive it.`,
+          ),
+        );
+      }
       if (runtimeModeEscalatesPrivilege(caller.runtimeMode, target.runtimeMode)) {
         return yield* Effect.fail(
           new ToolInputError(
@@ -1730,6 +1750,9 @@ export const makeAgentGateway = Effect.gen(function* () {
     ...computerBrowserTools,
     // Offer Hub tools only when the authoritative shared feature policy enables them.
     ...(isServerGroupsEnabled() ? [...projectAgentTools, ...(hubGateway?.tools ?? [])] : []),
+    // Listed only to Helix credentials: helix:lead and helix:builder are never in the
+    // base set, so ordinary and Hub sessions are unchanged.
+    ...makeAgentGatewayHelixTools({ port: helixGatewayPort }),
   ];
 
   // The computer family by name, read off the unfiltered catalog above: a

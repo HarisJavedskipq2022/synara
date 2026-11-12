@@ -20,6 +20,9 @@ import {
   type WsPushMessage,
   WS_CHANNELS,
   WS_METHODS,
+  HELIX_WS_METHODS,
+  WS_HELIX_MESSAGE_PAIRING_CAPABILITY,
+  WS_HELIX_PAIRS_CAPABILITY,
   type WsPush,
   type ServerProviderStatus,
 } from "@synara/contracts";
@@ -35,6 +38,9 @@ let reportShellFailure: ((failure: { code: string | null; error: Error }) => voi
 const requestMock = vi.fn<(...args: Array<unknown>) => Promise<unknown>>();
 const disposeMock = vi.fn();
 const unsubscribeProjectAgentEventsMock = vi.fn(async (_projectId: string) => undefined);
+const unsubscribeHelixEventsMock = vi.fn(async (_leadThreadId: string | undefined) => undefined);
+let helixEventListener: ((event: unknown) => void) | undefined;
+let helixCapabilities: string[] = [];
 const showContextMenuFallbackMock =
   vi.fn<
     <T extends string>(
@@ -84,6 +90,16 @@ vi.mock("./wsTransport", () => {
         return subscribeMock(...args);
       };
       unsubscribeProjectAgentEvents = unsubscribeProjectAgentEventsMock;
+      unsubscribeHelixEvents = unsubscribeHelixEventsMock;
+      getCompatibility() {
+        return helixCapabilities.length > 0 ? { capabilities: helixCapabilities } : null;
+      }
+      onHelixEvent(listener: (event: unknown) => void) {
+        helixEventListener = listener;
+        return () => {
+          helixEventListener = undefined;
+        };
+      }
       onStateChange() {
         return () => undefined;
       }
@@ -170,6 +186,8 @@ beforeEach(() => {
   transportInstances.length = 0;
   disposeMock.mockReset();
   unsubscribeProjectAgentEventsMock.mockClear();
+  unsubscribeHelixEventsMock.mockClear();
+  helixCapabilities = [];
   showContextMenuFallbackMock.mockReset();
   withNativeMenuIconsMock.mockClear();
   subscribeMock.mockClear();
@@ -408,6 +426,7 @@ describe("wsNativeApi", () => {
       settings: {
         autoResumeAfterUsageLimits: false,
         usageLimitRecoveryEpoch: 0,
+        enableHelix: false,
         enableAssistantStreaming: true,
         enableProviderUpdateChecks: true,
         keepAwakeMode: "off",
@@ -598,6 +617,141 @@ describe("wsNativeApi", () => {
 
     await api.projectAgent.unsubscribe({ projectId });
     expect(unsubscribeProjectAgentEventsMock).toHaveBeenCalledExactlyOnceWith(projectId);
+  });
+
+  it("explains a Helix refusal by the server's reason, else by the command", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const command = {
+      type: "thread.checkpoint.revert",
+      commandId: "cmd-1",
+      threadId: "lead-1",
+      turnCount: 1,
+      createdAt: "2026-11-12T00:00:00.000Z",
+    } as never;
+    requestMock.mockRejectedValueOnce(
+      Object.assign(new Error("server text"), {
+        code: "HELIX_UNSUPPORTED_THREAD",
+        reason: "revert_lead_busy",
+      }),
+    );
+    await expect(api.orchestration.dispatchCommand(command)).rejects.toMatchObject({
+      code: "HELIX_UNSUPPORTED_THREAD",
+      reason: "revert_lead_busy",
+      serverMessage: "server text",
+      message: expect.stringContaining("The Lead is working"),
+    });
+    requestMock.mockRejectedValueOnce(
+      Object.assign(new Error("server text"), { code: "HELIX_UNSUPPORTED_THREAD" }),
+    );
+    await expect(api.orchestration.dispatchCommand(command)).rejects.toMatchObject({
+      message: expect.stringContaining("other agent in this pair"),
+    });
+  });
+
+  it("carries the composer's Helix choice on a user message only when the server takes it", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const { setHelixDraftChoice, useHelixDraftStore } = await import("./helix/helixDraftStore");
+    const api = createWsNativeApi();
+    const builderModelSelection = {
+      provider: "codex",
+      instanceId: "codex",
+      model: "gpt-5.5",
+    } as never;
+    const command = {
+      type: "thread.turn.start",
+      commandId: "cmd-2",
+      threadId: "lead-2",
+      message: { messageId: "m-1", role: "user", text: "go", attachments: [] },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-11-12T00:00:00.000Z",
+    } as never;
+    const sentHelix = () => {
+      const params = requestMock.mock.lastCall?.[1] as
+        | { command?: { helix?: unknown } }
+        | undefined;
+      return params?.command?.helix;
+    };
+
+    // Untouched: nothing rides along.
+    requestMock.mockResolvedValue({ sequence: 1 });
+    await api.orchestration.dispatchCommand(command);
+    expect(sentHelix()).toBeUndefined();
+
+    // Touched, but the server does not advertise helix.message-pairing.
+    setHelixDraftChoice("lead-2", { enabled: true, builderModelSelection });
+    await api.orchestration.dispatchCommand(command);
+    expect(sentHelix()).toBeUndefined();
+    expect(useHelixDraftStore.getState().choiceByThreadId.has("lead-2")).toBe(true);
+
+    // Advertised: the choice rides on the message, and a not-applied answer leaves a note.
+    helixCapabilities = [WS_HELIX_PAIRS_CAPABILITY, WS_HELIX_MESSAGE_PAIRING_CAPABILITY];
+    requestMock.mockResolvedValueOnce({
+      sequence: 2,
+      helixPairing: { status: "not_applied", reason: "setting_off" },
+    });
+    await api.orchestration.dispatchCommand(command);
+    expect(sentHelix()).toEqual({ enabled: true, builderModelSelection });
+    await vi.waitFor(() =>
+      expect(useHelixDraftStore.getState().choiceByThreadId.has("lead-2")).toBe(false),
+    );
+    expect(useHelixDraftStore.getState().noteByThreadId.get("lead-2")).toEqual({
+      reason: "setting_off",
+      message: null,
+      enabled: true,
+    });
+
+    // An answer to a question is not a new message: it carries nothing.
+    setHelixDraftChoice("lead-2", { enabled: false });
+    await api.orchestration.dispatchCommand({
+      ...(command as object),
+      asyncUserInputResponse: { requestId: "r-1" },
+    } as never);
+    expect(sentHelix()).toBeUndefined();
+  });
+
+  it("refuses Helix calls locally until the server advertises helix.pairs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue({ pairs: [] });
+
+    await expect(api.helix!.listPairs()).rejects.toMatchObject({ code: "HELIX_UNAVAILABLE" });
+    expect(requestMock).not.toHaveBeenCalled();
+
+    helixCapabilities = [WS_HELIX_PAIRS_CAPABILITY];
+    await expect(api.helix!.listPairs()).resolves.toEqual({ pairs: [] });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(HELIX_WS_METHODS.listPairs, {});
+  });
+
+  it("ref-counts Helix subscriptions per Lead scope and delivers stream events", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    helixCapabilities = [WS_HELIX_PAIRS_CAPABILITY];
+    requestMock.mockResolvedValue(undefined);
+    const leadThreadId = ThreadId.makeUnsafe("lead-1");
+    const events: unknown[] = [];
+    const off = api.helix!.onEvent((event) => events.push(event));
+
+    await api.helix!.subscribe({ leadThreadId });
+    await api.helix!.subscribe({ leadThreadId });
+    await api.helix!.subscribe({});
+    expect(
+      requestMock.mock.calls.filter(([method]) => method === HELIX_WS_METHODS.subscribe),
+    ).toEqual([
+      [HELIX_WS_METHODS.subscribe, { leadThreadId }],
+      [HELIX_WS_METHODS.subscribe, {}],
+    ]);
+
+    await api.helix!.unsubscribe({ leadThreadId });
+    expect(unsubscribeHelixEventsMock).not.toHaveBeenCalled();
+    await api.helix!.unsubscribe({ leadThreadId });
+    expect(unsubscribeHelixEventsMock).toHaveBeenCalledExactlyOnceWith(leadThreadId);
+
+    const snapshot = { type: "snapshot", pairs: [], view: null };
+    helixEventListener?.(snapshot);
+    expect(events).toEqual([snapshot]);
+    off();
   });
 
   it("re-subscribes the project-agent stream after the last unsubscribe", async () => {

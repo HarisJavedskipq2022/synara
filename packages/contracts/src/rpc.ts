@@ -465,6 +465,8 @@ export class WsRpcError extends Schema.TaggedErrorClass<WsRpcError>()("WsRpcErro
   message: Schema.String,
   cause: Schema.optional(Schema.Defect),
   code: Schema.optional(Schema.String),
+  /** A finer, machine-readable reason under `code` (e.g. `HelixRefusalReason`). */
+  reason: Schema.optional(Schema.String),
   retryable: Schema.optional(Schema.Boolean),
   retryAfterMs: Schema.optional(Schema.Number),
   /** Present only for the capped Sync-Key verification flow. */

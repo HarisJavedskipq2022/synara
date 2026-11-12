@@ -37,7 +37,8 @@ import {
   TurnId,
 } from "@synara/contracts";
 import { isTemporaryWorktreeBranch } from "@synara/shared/git";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import * as nodePath from "node:path";
 import { homedir } from "node:os";
 
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect";
@@ -100,6 +101,13 @@ import { makeComputerServiceLayer } from "../../computer/Layers/ComputerService.
 import { FakeComputerBackend } from "../../computer/FakeComputerBackend.ts";
 import { recordCreatedWorktreeInPlan } from "../operationPlan.ts";
 import { makeAgentGatewayInFlightRequestRegistry } from "../inFlightRequestRegistry.ts";
+import { agentGatewayCapabilitiesForRoleProfile } from "./AgentGatewaySessionRegistry.ts";
+import {
+  HelixGatewayPort,
+  type HelixGatewayPortShape,
+  type HelixToolCaller,
+} from "../../helix/Services/HelixGatewayPort.ts";
+import { HelixCoordinatorService } from "../../helix/Services/HelixCoordinator.ts";
 
 const NOW = "2026-03-01T10:00:00.000Z";
 const PROJECT_ID = ProjectId.makeUnsafe("project-1");
@@ -381,8 +389,37 @@ const VALID_TOKENS: Record<string, string> = {
   "token-parent-claude": "thread-parent",
   "token-parent-readonly": "thread-parent",
   "token-parent-computer": "thread-parent",
+  "token-parent-helix-lead": "thread-parent",
+  "token-parent-helix-builder": "thread-parent",
   "token-ghost": "thread-ghost",
 };
+
+const HARNESS_BASE_CAPABILITIES = new Set([
+  "thread:read",
+  "thread:write",
+  "automation:write",
+  "diagnostics:read",
+] as const);
+
+/** Helix tokens carry exactly what the real registry derives for their role profile. */
+function harnessCapabilities(token: string) {
+  if (token === "token-parent-readonly") return new Set(["thread:read"] as const);
+  if (token === "token-parent-computer")
+    return new Set(["thread:read", "computer:control"] as const);
+  if (token === "token-parent-helix-lead") {
+    return agentGatewayCapabilitiesForRoleProfile(HARNESS_BASE_CAPABILITIES, {
+      kind: "helix_lead",
+      pairId: "pair",
+    });
+  }
+  if (token === "token-parent-helix-builder") {
+    return agentGatewayCapabilitiesForRoleProfile(HARNESS_BASE_CAPABILITIES, {
+      kind: "helix_builder",
+      pairId: "pair",
+    });
+  }
+  return HARNESS_BASE_CAPABILITIES;
+}
 
 function makeHarnessLayer(
   threads: ReadonlyArray<OrchestrationThreadShell>,
@@ -452,6 +489,8 @@ function makeHarnessLayer(
     };
     /** Serves the computer_* family in the tool catalog (denial paths only need the names). */
     readonly computerService?: Layer.Layer<ComputerService>;
+    readonly helixGatewayPort?: HelixGatewayPortShape;
+    readonly helixBuilderThreadIds?: ReadonlyArray<string>;
     readonly retiredWriteAuthorities?: ReadonlyArray<{
       readonly threadId: string;
       readonly sessionKey: string;
@@ -507,17 +546,7 @@ function makeHarnessLayer(
             provider:
               token === "token-parent-claude" ? ("claudeAgent" as const) : ("codex" as const),
             issuedAt: 0,
-            capabilities:
-              token === "token-parent-readonly"
-                ? new Set(["thread:read"] as const)
-                : token === "token-parent-computer"
-                  ? new Set(["thread:read", "computer:control"] as const)
-                  : new Set([
-                      "thread:read",
-                      "thread:write",
-                      "automation:write",
-                      "diagnostics:read",
-                    ] as const),
+            capabilities: harnessCapabilities(token),
           }
         : null;
     },
@@ -1409,6 +1438,32 @@ function makeHarnessLayer(
     Layer.provide(
       Layer.mergeAll(
         options.computerService ?? Layer.empty,
+        options.helixGatewayPort
+          ? Layer.succeed(HelixGatewayPort, options.helixGatewayPort)
+          : Layer.empty,
+        options.helixBuilderThreadIds
+          ? Layer.succeed(HelixCoordinatorService, {
+              roleOf: (threadId: string) =>
+                options.helixBuilderThreadIds!.includes(threadId)
+                  ? {
+                      role: "builder" as const,
+                      pairId: "pair" as never,
+                      active: true,
+                      counterpartThreadId: "thread-parent",
+                    }
+                  : null,
+              builderThreadIds: () => new Set(options.helixBuilderThreadIds),
+              sessionRoleFor: () => Effect.succeed(null),
+              admitAutomaticTurn: () => Effect.succeed(true),
+              shouldSendServerTurn: () => Effect.succeed(true),
+              interceptClientCommand: () => Effect.succeed({ afterAccepted: Effect.void }),
+              assertMayMoveWorkspace: () => Effect.void,
+              awaitMessagePairing: () => Effect.void,
+              onDomainEvent: () => Effect.void,
+              sweep: () => Effect.void,
+              reconcileStartup: () => Effect.void,
+            })
+          : Layer.empty,
         options.remoteConnections
           ? Layer.succeed(HostConnectionRegistryService, options.remoteConnections)
           : Layer.empty,
@@ -6961,5 +7016,233 @@ describe("AgentGateway", () => {
       assert.include(toolErrorText(setGoal.result), "full-access");
       assert.equal(harness.dispatched.length, 0);
     }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  describe("Helix role-exclusive tool sets", () => {
+    const listToolNames = (harness: GatewayHarness, token: string) =>
+      harness
+        .postRaw({
+          authorizationHeader: `Bearer ${token}`,
+          body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        })
+        .pipe(
+          Effect.map((response) =>
+            (
+              (response.body as { result?: { tools?: Array<{ name: string }> } } | undefined)
+                ?.result?.tools ?? []
+            ).map((tool) => tool.name),
+          ),
+        );
+    const errorCode = (result: Record<string, unknown> | undefined) =>
+      (toolResultJson(result).error as { code?: string } | undefined)?.code;
+    const LEAD_TOOLS = ["helix_delegate", "helix_wait", "helix_inspect", "helix_review"];
+
+    it.effect("lists only helix_report to a Builder credential", () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [], {
+        hubCoordinator: true,
+      });
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        assert.deepStrictEqual(yield* listToolNames(harness, "token-parent-helix-builder"), [
+          "helix_report",
+        ]);
+      }).pipe(Effect.provide(gatewayLayer));
+    });
+
+    it.effect("lets a Builder call helix_report and nothing else", () => {
+      const calls: Array<{ readonly tool: string; readonly caller: HelixToolCaller }> = [];
+      const port: HelixGatewayPortShape = {
+        delegate: (caller) =>
+          Effect.sync(() => calls.push({ tool: "delegate", caller })).pipe(
+            Effect.andThen(Effect.die("unused")),
+          ),
+        wait: () => Effect.die("unused"),
+        inspect: () => Effect.die("unused"),
+        review: () => Effect.die("unused"),
+        report: (caller, input) =>
+          Effect.sync(() => {
+            calls.push({ tool: "report", caller });
+            return {
+              handoffId: "helix-handoff:1" as never,
+              reportRevision: 1,
+              message: `stored ${input.outcome}`,
+            };
+          }),
+      };
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [], {
+        helixGatewayPort: port,
+      });
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        const reported = yield* harness.callTool({
+          token: "token-parent-helix-builder",
+          name: "helix_report",
+          args: { outcome: "completed", summary: "Done" },
+        });
+        assert.isFalse(isToolError(reported.result));
+        assert.deepStrictEqual(toolResultJson(reported.result), {
+          handoffId: "helix-handoff:1",
+          reportRevision: 1,
+          message: "stored completed",
+        });
+        assert.lengthOf(calls, 1);
+        assert.equal(calls[0]?.caller.role, "builder");
+        assert.equal(calls[0]?.caller.threadId, "thread-parent");
+
+        // Thread creation, messaging, interrupt, kanban, automation and every Lead tool are denied.
+        for (const name of [
+          "synara_create_thread",
+          "synara_create_threads",
+          "synara_send_message",
+          "synara_interrupt_thread",
+          "synara_set_thread_archived",
+          "synara_list_threads",
+          "synara_create_kanban_task",
+          "synara_create_automation",
+          ...LEAD_TOOLS,
+        ]) {
+          const denied = yield* harness.callTool({
+            token: "token-parent-helix-builder",
+            name,
+            args: {},
+          });
+          assert.equal(errorCode(denied.result), "capability_denied", name);
+        }
+        assert.lengthOf(calls, 1);
+        assert.equal(harness.dispatched.length, 0);
+
+        // Malformed arguments never reach the port.
+        const invalid = yield* harness.callTool({
+          token: "token-parent-helix-builder",
+          name: "helix_report",
+          args: { outcome: "great" },
+        });
+        assert.equal(errorCode(invalid.result), "helix_invalid_input");
+        assert.lengthOf(calls, 1);
+      }).pipe(Effect.provide(gatewayLayer));
+    });
+
+    it.effect("adds exactly the Lead tools to a Lead's normal list", () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        const ordinary = yield* listToolNames(harness, "token-parent");
+        const asLead = yield* listToolNames(harness, "token-parent-helix-lead");
+        assert.isAbove(ordinary.length, 0);
+        assert.deepStrictEqual(asLead, [...ordinary, ...LEAD_TOOLS]);
+        const report = yield* harness.callTool({
+          token: "token-parent-helix-lead",
+          name: "helix_report",
+          args: { outcome: "completed", summary: "x" },
+        });
+        assert.equal(errorCode(report.result), "capability_denied");
+      }).pipe(Effect.provide(gatewayLayer));
+    });
+
+    it.effect("leaves ordinary and Hub sessions without any Helix tool", () => {
+      const variants = [
+        makeHarnessLayer(baseThreads),
+        makeHarnessLayer(baseThreads, [], { hubCoordinator: true, threadPrincipal: "coordinator" }),
+        makeHarnessLayer(baseThreads, [], { threadPrincipal: "worker" }),
+      ];
+      return Effect.forEach(variants, ({ gatewayLayer, makeHarness }) =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness;
+          for (const token of ["token-parent", "token-parent-readonly", "token-parent-computer"]) {
+            const names = yield* listToolNames(harness, token);
+            assert.isFalse(
+              names.some((name) => name.startsWith("helix_")),
+              `${token} must not see Helix tools`,
+            );
+          }
+          const delegated = yield* harness.callTool({
+            token: "token-parent",
+            name: "helix_delegate",
+            args: {},
+          });
+          assert.equal(errorCode(delegated.result), "capability_denied");
+        }).pipe(Effect.provide(gatewayLayer)),
+      ).pipe(Effect.asVoid);
+    });
+
+    it.effect(
+      "refuses ordinary thread tools that target a Helix Builder, even from its Lead",
+      () => {
+        const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [], {
+          helixBuilderThreadIds: ["thread-child"],
+        });
+        return Effect.gen(function* () {
+          const harness = yield* makeHarness;
+          for (const [name, args] of [
+            ["synara_send_message", { threadId: "thread-child", message: "do it" }],
+            ["synara_interrupt_thread", { threadId: "thread-child" }],
+            ["synara_set_thread_title", { threadId: "thread-child", title: "Renamed" }],
+            ["synara_set_thread_pull_request", { threadId: "thread-child", reference: "12" }],
+            ["synara_set_thread_archived", { threadId: "thread-child", archived: true }],
+            ["synara_set_thread_goal", { threadId: "thread-child", goal: "Keep going" }],
+          ] as const) {
+            const response = yield* harness.callTool({ token: "token-parent", name, args });
+            assert.isTrue(isToolError(response.result), name);
+            assert.include(toolErrorText(response.result), "Helix Builder", name);
+          }
+          assert.equal(harness.dispatched.length, 0);
+        }).pipe(Effect.provide(gatewayLayer));
+      },
+    );
+
+    it.effect("lists exactly the tools every non-Helix credential listed before Helix", () => {
+      // Captured from this harness before any Helix change (tools/list per variant and token).
+      const before = JSON.parse(
+        readFileSync(
+          nodePath.join(import.meta.dirname, "__fixtures__", "toolListsBeforeHelix.json"),
+          "utf8",
+        ),
+      ) as Record<string, ReadonlyArray<string>>;
+      const variants = [
+        ["ordinary", makeHarnessLayer(baseThreads)],
+        [
+          "hub-coordinator",
+          makeHarnessLayer(baseThreads, [], {
+            hubCoordinator: true,
+            threadPrincipal: "coordinator",
+          }),
+        ],
+        ["hub-worker", makeHarnessLayer(baseThreads, [], { threadPrincipal: "worker" })],
+      ] as const;
+      return Effect.forEach(variants, ([variant, { gatewayLayer, makeHarness }]) =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness;
+          for (const token of [
+            "token-parent",
+            "token-parent-claude",
+            "token-parent-readonly",
+            "token-parent-computer",
+          ]) {
+            assert.deepStrictEqual(
+              yield* listToolNames(harness, token),
+              before[`${variant}:${token}`],
+              `${variant}:${token}`,
+            );
+          }
+        }).pipe(Effect.provide(gatewayLayer)),
+      ).pipe(Effect.asVoid);
+    });
+
+    it.effect("reports not implemented until the coordinator provides the port", () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        const delegated = yield* harness.callTool({
+          token: "token-parent-helix-lead",
+          name: "helix_delegate",
+          args: {
+            requestId: "first",
+            brief: { title: "T", objective: "O", acceptanceCriteria: "A" },
+          },
+        });
+        assert.equal(errorCode(delegated.result), "helix_not_implemented");
+        assert.equal(harness.dispatched.length, 0);
+      }).pipe(Effect.provide(gatewayLayer));
+    });
   });
 });

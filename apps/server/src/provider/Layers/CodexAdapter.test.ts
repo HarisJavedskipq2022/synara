@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import {
   EventId,
   ApprovalRequestId,
+  HelixPairId,
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
@@ -284,6 +285,35 @@ validationLayer("CodexAdapterLive validation", (it) => {
         validationManager.startSessionImpl.mock.calls[0]?.[0].autoApproveSynaraTools,
         true,
       );
+    }),
+  );
+
+  it.effect("passes a Helix role to the Codex manager and none for an ordinary session", () =>
+    Effect.gen(function* () {
+      validationManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      const helixRole = {
+        role: "builder" as const,
+        pairId: HelixPairId.makeUnsafe("helix-pair:test"),
+        promptVersion: "helix-roles/1",
+        instructions: "## Helix: you are the Builder",
+      };
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-helix-builder"),
+        runtimeMode: "full-access",
+        helixRole,
+      });
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-ordinary"),
+        runtimeMode: "full-access",
+      });
+      const [helix, ordinary] = validationManager.startSessionImpl.mock.calls.map(
+        (call) => call[0],
+      );
+      assert.deepStrictEqual(helix?.helixRole, helixRole);
+      assert.strictEqual(ordinary !== undefined && "helixRole" in ordinary, false);
     }),
   );
 

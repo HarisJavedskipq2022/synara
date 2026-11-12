@@ -338,6 +338,11 @@ import {
 } from "./SidebarGroupsSurface.logic";
 
 import { useProjectAgentSummaries } from "./chat/project/useProjectAgentSummaries";
+import {
+  useHelixBuilderThreadIds,
+  useHelixEnabled,
+  useHelixSidebarStatuses,
+} from "../helix/useHelix";
 import { RenameDialog } from "./RenameDialog";
 import { EditProjectDialog, type EditProjectValue } from "./EditProjectDialog";
 import { RelocateProjectDialog } from "./RelocateProjectDialog";
@@ -1844,9 +1849,17 @@ export default function Sidebar() {
     visibleNonGroupThreads: visibleNonGroupSidebarThreads,
     activityNonGroupThreads: activityNonGroupSidebarThreads,
   } = useActivityThreads({ hideAutomationRunThreads });
+  // Helix Builders are reached from their Lead chat, never listed on their own.
+  const helixBuilderThreadIds = useHelixBuilderThreadIds();
+  const helixEnabled = useHelixEnabled();
+  const helixSidebarStatuses = useHelixSidebarStatuses(helixEnabled);
   const displaySidebarTreeThreads = useMemo(
-    () => excludeHiddenProjectAgentCoordinatorThreads(sidebarTreeThreads, coordinatorThreadIds),
-    [coordinatorThreadIds, sidebarTreeThreads],
+    () =>
+      excludeHiddenProjectAgentCoordinatorThreads(
+        excludeHiddenProjectAgentCoordinatorThreads(sidebarTreeThreads, coordinatorThreadIds),
+        helixBuilderThreadIds,
+      ),
+    [coordinatorThreadIds, helixBuilderThreadIds, sidebarTreeThreads],
   );
   const { nonGroupThreads: nonGroupSidebarTreeThreads, groupThreads: groupSidebarTreeThreads } =
     useMemo(
@@ -1953,8 +1966,9 @@ export default function Sidebar() {
           thread.envMode === "worktree" &&
           thread.latestTurn === null &&
           thread.session === null,
+        helix: helixSidebarStatuses.get(thread.id) ?? null,
       }),
-    [activeComposerSendThreadIds, dismissedThreadStatusKeyByThreadId],
+    [activeComposerSendThreadIds, dismissedThreadStatusKeyByThreadId, helixSidebarStatuses],
   );
   const resolveActivityPriorityTierForSidebar = useCallback(
     (thread: SidebarThreadSummary) =>
