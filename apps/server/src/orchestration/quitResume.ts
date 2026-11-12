@@ -66,6 +66,7 @@ import {
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionPendingInteractionRepository } from "../persistence/Services/ProjectionPendingInteractions.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { ProviderCommandReactor } from "./Services/ProviderCommandReactor.ts";
 
 /**
  * A quit normally stops this process within seconds (desktop shutdown timeout is
@@ -194,6 +195,7 @@ export const captureCrashResumeRecord = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const interactions = yield* ProjectionPendingInteractionRepository;
   const snapshots = yield* ProjectionSnapshotQuery;
+  const providerCommands = yield* ProviderCommandReactor;
   const now = new Date().toISOString();
   const pending = yield* interactions.listUnsettled({});
   const blocked = new Set(pending.map((entry) => entry.threadId));
@@ -202,11 +204,17 @@ export const captureCrashResumeRecord = Effect.gen(function* () {
   // candidates' durable details before deciding whether an automation owns them.
   const details = yield* Effect.forEach(
     readModel.threads.filter(
-      (thread) => thread.latestTurn?.state === "running" && thread.session?.status === "running",
+      (thread) =>
+        thread.parentThreadId == null &&
+        thread.latestTurn?.state === "running" &&
+        thread.session?.status === "running",
     ),
     // The stored user request can have a null turnId even after its turn starts.
     // The detail snapshot links requests to turns through pending_message_id.
-    (thread) => snapshots.getThreadDetailSnapshotById(thread.id),
+    (thread) =>
+      providerCommands
+        .withRestartOrphanedThread(thread.id, snapshots.getThreadDetailSnapshotById(thread.id))
+        .pipe(Effect.map(Option.flatten)),
     { concurrency: 4 },
   );
   const threads = details.flatMap((detail) => (Option.isSome(detail) ? [detail.value.thread] : []));
@@ -291,7 +299,8 @@ export function buildQuitInterruptCommand(input: {
  * Pure: map a consumed record onto the current read model. A thread is resumed
  * only when it still exists, is not deleted, its project exists, and
  * `threadResumePreconditionViolation` is clear (not archived, nothing in flight,
- * no turn completed on its own since the record). The automatic continuation
+ * no replacement moved it on or turn completed on its own since the record).
+ * The automatic continuation
  * uses the thread's own runtime/interaction settings (model omitted → provider
  * reactor uses the thread's current selection) and carries
  * the same precondition for the decider to enforce atomically.

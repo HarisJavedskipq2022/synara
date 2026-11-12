@@ -2218,6 +2218,32 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const withRestartOrphanedThread: ProviderCommandReactorShape["withRestartOrphanedThread"] = (
+    threadId,
+    effect,
+  ) =>
+    Effect.gen(function* () {
+      const owner = (yield* resolveDeliverySessionThread(threadId))?.id ?? threadId;
+      return yield* turnCheckpointCoordinator.withThreadLease(
+        owner,
+        Effect.gen(function* () {
+          // An accepted intent can start a native turn during boot replay. Its
+          // lease also covers startup before the adapter lists a session.
+          const sessions = yield* providerService.listSessions();
+          if (
+            sessions.some(
+              (session) =>
+                session.threadId === owner &&
+                session.status !== "closed" &&
+                session.status !== "error",
+            )
+          )
+            return Option.none();
+          return Option.some(yield* effect);
+        }),
+      );
+    });
+
   const resolveSubagentProviderThreadId = (
     threadId: ThreadId,
     parentThreadId: ThreadId | null | undefined,
@@ -11231,6 +11257,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain,
+    withRestartOrphanedThread,
     listBlockingDeliveries,
     reconcileDelivery,
     regenerateThreadTitle,
