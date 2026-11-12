@@ -58,6 +58,21 @@ swapping the database again or replacing the original failed copy. If an
 interruption split the original database from its WAL/SHM during the move,
 retry resumes the same recorded bundle so its committed writes stay together.
 
+## Fork migration 143 compatibility
+
+Arbor retains its already-applied Helix identities at 143 (`HelixPairs`), 144
+(`HelixRetiredBuilders`), 145 (`HelixStopRequests`) and 146 (`HelixAppliedMessages`).
+Existing Helix databases keep those receipts and their tables unchanged. Migration
+147 adds the usage-archive table that upstream released as migration 143.
+
+For the exact upstream `143_UsageAnalyticsDeletedTokens` identity following a
+canonical prefix, the existing lineage-alias repair removes only that conflicting
+receipt. Startup then creates the missing Helix tables and records the idempotent
+usage migration at 147; existing archived usage rows remain intact. The normal
+pre-migration backup and restore protections cover both histories. Unknown or
+mixed histories retain the existing divergence checks rather than being treated
+as this known alias.
+
 ## Explicit offline compaction
 
 When shutdown maintenance keeps deferring a large legacy database, close every

@@ -169,6 +169,7 @@ import Migration0143 from "./Migrations/143_HelixPairs.ts";
 import Migration0144 from "./Migrations/144_HelixRetiredBuilders.ts";
 import Migration0145 from "./Migrations/145_HelixStopRequests.ts";
 import Migration0146 from "./Migrations/146_HelixAppliedMessages.ts";
+import Migration0147 from "./Migrations/147_UsageAnalyticsDeletedTokens.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -331,6 +332,8 @@ export const migrationEntries = [
   [144, "HelixRetiredBuilders", Migration0144],
   [145, "HelixStopRequests", Migration0145],
   [146, "HelixAppliedMessages", Migration0146],
+  // Upstream used 143 after this fork had already applied Helix at 143–146.
+  [147, "UsageAnalyticsDeletedTokens", Migration0147],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -450,6 +453,16 @@ export interface MigrationLineageAlias {
 }
 
 export const MIGRATION_LINEAGE_ALIASES: readonly MigrationLineageAlias[] = [
+  {
+    // Upstream v1.5.2 recorded its additive usage table at 143. Keep our
+    // existing Helix receipts untouched. An upstream tracker instead drops
+    // only its conflicting row, runs Helix 143–146, and records the same
+    // idempotent usage migration at 147 without changing its archived rows.
+    historicalId: 143,
+    historicalName: "UsageAnalyticsDeletedTokens",
+    currentId: 147,
+    historicalSlotRequiresRerun: true,
+  },
   {
     // Shipped in v0.5.5. Migration 54 is now `Effect.void` (see
     // `Migrations/054_ReservedDurableProviderCommandDelivery.ts`), so the slot

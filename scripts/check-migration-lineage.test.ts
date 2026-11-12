@@ -216,6 +216,28 @@ describe("migration lineage guard", () => {
     expect(parseMigrationLineageAllowances("export const other = [];")).toEqual([]);
   });
 
+  it("preserves Helix's applied identities and repairs the upstream 143 collision at a real append-only migration", () => {
+    const source = migrationsSource();
+    const current = parseMigrationLineage(source);
+    expect(current.filter(({ id }) => id >= 143)).toEqual([
+      { id: 143, name: "HelixPairs" },
+      { id: 144, name: "HelixRetiredBuilders" },
+      { id: 145, name: "HelixStopRequests" },
+      { id: 146, name: "HelixAppliedMessages" },
+      { id: 147, name: "UsageAnalyticsDeletedTokens" },
+    ]);
+    const shipped = [
+      ...current.filter(({ id }) => id <= 142),
+      { id: 143, name: "UsageAnalyticsDeletedTokens" },
+    ];
+    expect(findReleasedLineageViolations(shipped, current)).toEqual([
+      { id: 143, releasedName: "UsageAnalyticsDeletedTokens", currentName: "HelixPairs" },
+    ]);
+    expect(
+      findReleasedLineageViolations(shipped, current, parseMigrationLineageAllowances(source)),
+    ).toEqual([]);
+  });
+
   it("reports one line per broken pair, listing every tag that shipped it", () => {
     const violation = { id: 54, releasedName: "ProjectPullRequestPins", currentName: null };
     expect(
